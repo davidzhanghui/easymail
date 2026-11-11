@@ -1,0 +1,93 @@
+name: Release
+
+# 推送 v* tag（scripts/push-tag.sh）或手动触发：检查 → 通用二进制（arm64 + x86_64）DMG → 发布 Release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '发布的 tag（如 v1.0.1），须已存在'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+    env:
+      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Rust 工具链（版本见 rust-toolchain.toml）+ 两个架构的标准库
+        run: |
+          rustup show
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: 版本号与 tag 一致
+        run: |
+          v=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          [ "v$v" = "$RELEASE_TAG" ] || { echo "::error::Cargo.toml 版本 $v 与 tag $RELEASE_TAG 不一致"; exit 1; }
+
+      # 界面端到端需要图形会话，CI 上跳过；其余检查任何一项失败都不出包
+      - name: 下载 GreenMail（端到端测试用，带 sha256 校验）
+        run: scripts/fetch-greenmail.sh
+      - name: 质量检查
+        env:
+          EASYMAIL_REQUIRE_GREENMAIL: "1"
+        run: scripts/check.sh --no-ui
+
+      - name: 打包（通用二进制 DMG）
+        run: |
+          scripts/build.sh --fast
+          cd dist && shasum -a 256 EasyMail-*.dmg > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - name: 发布说明
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat > notes.md <<'MD'
+          ## 下载 | Download
+
+          `EasyMail-*.dmg` 是通用二进制，Apple Silicon 与 Intel Mac 通用（macOS 12+）。
+          Universal binary for Apple Silicon and Intel Macs (macOS 12+).
+
+          ## 安装 | Install
+
+          **中文**：打开 dmg，把「迷你邮件.app」拖入「应用程序」。本应用未经 Apple 公证，首次打开若提示「已损坏，无法打开」，在终端执行一次：
+
+          ```bash
+          xattr -cr /Applications/迷你邮件.app
+          ```
+
+          **English**: Open the dmg and drag `迷你邮件.app` into Applications. The app is not notarized; if macOS reports it as "damaged", run the command above once in Terminal.
+          MD
+          awk -v h="## [${RELEASE_TAG#v}]" 'index($0,h)==1{f=1;next} f&&/^## \[/{exit} f' CHANGELOG.md > changes.md
+          if [ -s changes.md ]; then printf '\n## 更新内容 | Changes\n\n' >> notes.md; cat changes.md >> notes.md; fi
+          AUTO=$(gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="$RELEASE_TAG" --jq .body 2>/dev/null || true)
+          [ -n "$AUTO" ] && printf '\n---\n\n%s\n' "$AUTO" >> notes.md
+          cat notes.md
+
+      - name: 创建 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$RELEASE_TAG" dist/EasyMail-*.dmg dist/SHA256SUMS.txt \
+            -R "$GITHUB_REPOSITORY" --title "EasyMail $RELEASE_TAG" --notes-file notes.md

@@ -1,0 +1,511 @@
+<!doctype html>
+<html data-theme="__THEME__">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; script-src 'nonce-__NONCE__'; form-action 'none'; base-uri 'none'">
+<style>
+:root { __VARS__ }
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); overflow: hidden; }
+body { font: 14px/1.7 -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; -webkit-font-smoothing: antialiased; }
+#wrap { display: flex; flex-direction: column; height: 100%; }
+#scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 12px 6px; cursor: text; }
+#ed { outline: none; min-height: 100%; word-wrap: break-word; overflow-wrap: anywhere; caret-color: var(--accent); }
+#ed[data-empty="1"]::before { content: attr(data-ph); color: var(--muted); pointer-events: none; position: absolute; }
+#ed img { max-width: 100%; height: auto; border-radius: 4px; }
+#ed img.sel { outline: 2px solid var(--accent); }
+#ed a { color: var(--accent); }
+#ed blockquote { margin: 0 0 0 .8ex; border-left: 2px solid #ccc; padding-left: 1ex; color: var(--muted); }
+#ed ul, #ed ol { margin: 4px 0; padding-left: 28px; }
+/* 暗色主题：原邮件自带的深色字、白底表头会压在深色背景上看不清。只覆盖显示，序列化时内联样式原样保留 */
+html[data-theme="dark"] #ed :is(.q, blockquote), html[data-theme="dark"] #ed :is(.q, blockquote) * { color: var(--muted) !important; background-color: transparent !important; background-image: none !important; border-color: var(--border) !important; }
+html[data-theme="dark"] #ed blockquote:not(.webkit-indent-blockquote) { border-left-color: var(--muted) !important; }
+html[data-theme="dark"] #ed :is(.q, blockquote) a { color: var(--accent) !important; }
+html[data-theme="dark"] #ed :is(.q, blockquote) :is(b, strong, h1, h2, h3, h4, th) { color: var(--fg) !important; }
+body.dragging #scroll { background: var(--accent-soft); }
+.bar { flex: none; display: flex; align-items: center; gap: 2px; padding: 4px 8px; position: relative; }
+#fmt { margin: 0 10px 4px; padding: 3px 6px; border-radius: 10px; background: var(--panel2); flex-wrap: wrap; }
+#act { border-top: 1px solid var(--border); padding: 5px 10px; }
+.sep { width: 1px; height: 18px; background: var(--border); margin: 0 4px; flex: none; }
+.btn { display: inline-flex; align-items: center; justify-content: center; min-width: 28px; height: 28px; padding: 0 5px; border-radius: 6px; border: 0; background: transparent; color: var(--fg); cursor: pointer; font: 13px/1 -apple-system, 'PingFang SC', sans-serif; white-space: nowrap; user-select: none; -webkit-user-select: none; }
+.btn:hover { background: var(--hover); }
+.btn.on { background: var(--accent-soft); color: var(--accent); }
+.btn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.btn .caret { width: 9px; height: 9px; margin-left: 3px; opacity: .6; stroke-width: 2.4; }
+.btn.wide { min-width: 74px; justify-content: space-between; padding: 0 8px; }
+#pop { position: fixed; z-index: 10; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,.22); padding: 6px; display: none; max-width: calc(100vw - 16px); }
+#pop.show { display: block; }
+.menu .item { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 6px; cursor: pointer; min-width: 150px; font-size: 13px; }
+.menu .item:hover { background: var(--hover); }
+.menu .item.cur::before { content: '✓'; width: 12px; }
+.menu .item:not(.cur)::before { content: ''; width: 12px; }
+.colors { display: grid; grid-template-columns: repeat(10, 22px); gap: 4px; padding: 4px; }
+.colors i { width: 22px; height: 22px; border-radius: 4px; border: 1px solid rgba(128,128,128,.35); cursor: pointer; display: block; }
+.colors i:hover { transform: scale(1.15); }
+.pop-title { font-size: 11px; color: var(--muted); padding: 2px 4px; }
+.emojis { width: 332px; }
+.emojis .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); padding-bottom: 4px; margin-bottom: 4px; }
+.emojis .tabs .btn { font-size: 16px; min-width: 32px; }
+.emojis .grid { display: grid; grid-template-columns: repeat(9, 34px); gap: 1px; height: 198px; overflow-y: auto; }
+.emojis .grid span { font-size: 22px; line-height: 34px; text-align: center; border-radius: 6px; cursor: pointer; font-family: 'Apple Color Emoji', sans-serif; }
+.emojis .grid span:hover { background: var(--hover); }
+.linkf { width: 330px; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+.linkf label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 3px; }
+.linkf input { width: 100%; height: 30px; border: 1px solid var(--border); border-radius: 6px; padding: 0 8px; background: var(--bg); color: var(--fg); font: 13px -apple-system, 'PingFang SC', sans-serif; outline: none; }
+.linkf input:focus { border-color: var(--accent); }
+.linkf .row { display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
+.linkf .row .grow { flex: 1; }
+.pbtn { height: 28px; padding: 0 14px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel2); color: var(--fg); cursor: pointer; font-size: 13px; }
+.pbtn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.pbtn.link { border: 0; background: transparent; color: var(--muted); padding: 0 4px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="scroll"><div id="ed" contenteditable="true" spellcheck="true" data-ph="__PLACEHOLDER__">__BODY__</div></div>
+  <div id="fmt" class="bar"></div>
+  <div id="act" class="bar"></div>
+</div>
+<div id="pop"></div>
+__QUOTE__
+<script nonce="__NONCE__">
+(function () {
+'use strict';
+const $ = (s) => document.querySelector(s);
+const ed = $('#ed'), pop = $('#pop');
+const post = (o) => { try { window.webkit.messageHandlers.em.postMessage(JSON.stringify(o)); } catch (e) {} };
+const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+try { document.execCommand('styleWithCSS', false, true); document.execCommand('defaultParagraphSeparator', false, 'div'); } catch (e) {}
+
+// ───────── 图标 ─────────
+const I = (p) => '<svg viewBox="0 0 24 24">' + p + '</svg>';
+const ICON = {
+  bold: I('<path d="M6 4h8a4 4 0 010 8H6zM6 12h9a4 4 0 010 8H6z"/>'),
+  italic: I('<path d="M19 4h-9M14 20H5M15 4L9 20"/>'),
+  underline: I('<path d="M6 4v7a6 6 0 0012 0V4M4 21h16"/>'),
+  strike: I('<path d="M4 12h16M16.5 6.5C15.6 5 14 4 12 4 9.7 4 8 5.2 8 7c0 1.2.8 2.2 2.6 2.8M7.5 17c.9 1.8 2.6 3 4.7 3 2.5 0 4.3-1.3 4.3-3.2 0-1-.4-1.8-1.3-2.4"/>'),
+  left: I('<path d="M4 6h16M4 10h10M4 14h16M4 18h10"/>'),
+  center: I('<path d="M4 6h16M7 10h10M4 14h16M7 18h10"/>'),
+  right: I('<path d="M4 6h16M10 10h10M4 14h16M10 18h10"/>'),
+  justify: I('<path d="M4 6h16M4 10h16M4 14h16M4 18h16"/>'),
+  ol: I('<path d="M11 6h10M11 12h10M11 18h10"/><text x="2" y="8" font-size="7" fill="currentColor" stroke="none">1</text><text x="2" y="14" font-size="7" fill="currentColor" stroke="none">2</text><text x="2" y="20" font-size="7" fill="currentColor" stroke="none">3</text>'),
+  ul: I('<path d="M10 6h11M10 12h11M10 18h11"/><circle cx="4.5" cy="6" r="1.2"/><circle cx="4.5" cy="12" r="1.2"/><circle cx="4.5" cy="18" r="1.2"/>'),
+  indent: I('<path d="M3 5h18M11 10h10M11 15h10M3 20h18M3 9l4 3-4 3z"/>'),
+  outdent: I('<path d="M3 5h18M11 10h10M11 15h10M3 20h18M7 9l-4 3 4 3z"/>'),
+  quote: I('<path d="M6 8h4v4c0 2.5-1.2 4-3.5 5M14 8h4v4c0 2.5-1.2 4-3.5 5"/>'),
+  clear: I('<path d="M6 4h12M12 4v9M9 20h6M4 4l16 16"/>'),
+  link: I('<path d="M10 14a4 4 0 005.7 0l3-3a4 4 0 00-5.7-5.7l-1 1M14 10a4 4 0 00-5.7 0l-3 3a4 4 0 005.7 5.7l1-1"/>'),
+  smile: I('<circle cx="12" cy="12" r="9"/><path d="M8 14c1 1.5 2.300 2 4 2s3-.5 4-2"/><circle cx="9" cy="10" r=".6"/><circle cx="15" cy="10" r=".6"/>'),
+  image: I('<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.5"/><path d="M21 16l-5-5-8 9"/>'),
+  caret: I('<path d="M6 9l6 6 6-6"/>'),
+};
+
+// ───────── 选区 ─────────
+let saved = null;
+document.addEventListener('selectionchange', () => {
+  const s = getSelection();
+  if (s.rangeCount && ed.contains(s.anchorNode)) { saved = s.getRangeAt(0).cloneRange(); refresh(); }
+});
+function restore() {
+  ed.focus({ preventScroll: true });
+  const s = getSelection();
+  if (saved && ed.contains(saved.commonAncestorContainer)) { s.removeAllRanges(); s.addRange(saved); }
+  else { const r = document.createRange(); r.selectNodeContents(ed); r.collapse(false); s.removeAllRanges(); s.addRange(r); }
+}
+function ancestor(sel, node) {
+  node = node || (saved && saved.startContainer);
+  while (node && node !== ed) { if (node.nodeType === 1 && node.matches(sel)) return node; node = node.parentNode; }
+  return null;
+}
+
+// ───────── 内容变化 ─────────
+const QSTYLE = 'margin:0 0 0 .8ex;border-left:2px solid #ccc;padding-left:1ex;color:#666';
+function serialize() {
+  const c = ed.cloneNode(true);
+  c.querySelectorAll('img').forEach((i) => {
+    const t = i.getAttribute('data-token');
+    if (!t) { if (!/^data:image\//i.test(i.getAttribute('src') || '')) i.remove(); else i.setAttribute('style', 'max-width:100%;height:auto'); return; }
+    i.removeAttribute('src'); i.removeAttribute('class'); i.setAttribute('style', 'max-width:100%;height:auto');
+  });
+  c.querySelectorAll('blockquote:not(.webkit-indent-blockquote)').forEach((b) => b.setAttribute('style', QSTYLE));
+  c.querySelectorAll('[class]').forEach((n) => n.removeAttribute('class'));
+  c.querySelectorAll('a').forEach((a) => { a.removeAttribute('target'); a.removeAttribute('rel'); });
+  c.removeAttribute('data-empty'); c.removeAttribute('data-ph');
+  return c.innerHTML;
+}
+function checkEmpty() {
+  const empty = !ed.querySelector('img') && ed.textContent.replace(/[\s​]/g, '') === '' && !ed.querySelector('li');
+  ed.setAttribute('data-empty', empty ? '1' : '0');
+}
+let ct = null;
+function flush() { if (ct) { clearTimeout(ct); ct = null; } post({ t: 'changed', html: serialize() }); }
+function changed() { checkEmpty(); if (ct) clearTimeout(ct); ct = setTimeout(flush, 120); refresh(); }
+// 方向键 / Home / End 等功能键在 AppKit 里对应 U+F700–F8FF 的私有区字符：它们只该被当作命令，
+// 偶尔（输入法状态、焦点切换时）会被当成文字送进来，显示成方框 —— 一律拦下，已有的也清掉
+const FN = /[\uF700-\uF8FF]/g;
+ed.addEventListener('beforeinput', (e) => { if (typeof e.data === 'string' && /[\uF700-\uF8FF]/.test(e.data)) { e.preventDefault(); const r = e.data.replace(FN, ''); if (r) document.execCommand('insertText', false, r); } });
+function stripFn(root) {
+  const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let n, hit = false;
+  while ((n = w.nextNode())) { if (/[\uF700-\uF8FF]/.test(n.nodeValue)) { n.nodeValue = n.nodeValue.replace(FN, ''); hit = true; } }
+  return hit;
+}
+stripFn(ed);
+ed.addEventListener('input', () => { stripFn(ed); changed(); });
+
+// ───────── 工具栏 ─────────
+const fmt = $('#fmt'), act = $('#act');
+const btns = {};
+function mk(parent, key, icon, title, fn, extra) {
+  const b = document.createElement('button');
+  b.className = 'btn' + (extra ? ' ' + extra : '');
+  b.title = title; b.type = 'button';
+  b.innerHTML = icon;
+  b.addEventListener('mousedown', (e) => e.preventDefault());
+  b.addEventListener('click', (e) => { e.stopPropagation(); fn(b); });
+  parent.appendChild(b); btns[key] = b; return b;
+}
+function sep(parent) { const s = document.createElement('div'); s.className = 'sep'; parent.appendChild(s); }
+function exec(cmd, val) { restore(); document.execCommand(cmd, false, val); changed(); }
+
+const FONTS = [['无衬线', 'sans-serif'], ['衬线', 'serif'], ['等宽', 'monospace'], ['苹方', 'PingFang SC'], ['宋体', 'Songti SC'], ['楷体', 'Kaiti SC'], ['Arial', 'Arial'], ['Georgia', 'Georgia'], ['Times New Roman', 'Times New Roman'], ['Verdana', 'Verdana'], ['Courier New', 'Courier New']];
+const SIZES = [['小', 12], ['正常', 14], ['大', 20], ['超大', 28]];
+const COLORS = ['#000000', '#434343', '#666666', '#999999', '#b7b7b7', '#cccccc', '#d9d9d9', '#efefef', '#f3f3f3', '#ffffff',
+  '#980000', '#ff0000', '#ff9900', '#ffff00', '#00ff00', '#00ffff', '#4a86e8', '#0000ff', '#9900ff', '#ff00ff',
+  '#e6b8af', '#f4cccc', '#fce5cd', '#fff2cc', '#d9ead3', '#d0e0e3', '#c9daf8', '#cfe2f3', '#d9d2e9', '#ead1dc',
+  '#cc4125', '#e06666', '#f6b26b', '#ffd966', '#93c47d', '#76a5af', '#6d9eeb', '#6fa8dc', '#8e7cc3', '#c27ba0',
+  '#a61c00', '#cc0000', '#e69138', '#f1c232', '#6aa84f', '#45818e', '#3c78d8', '#3d85c6', '#674ea7', '#a64d79'];
+
+function setSize(px) {
+  restore();
+  document.execCommand('fontSize', false, '7');
+  ed.querySelectorAll('font[size="7"], span[style*="xxx-large"]').forEach((n) => { n.removeAttribute('size'); n.style.fontSize = px + 'px'; });
+  changed();
+}
+function toggleQuote() {
+  restore();
+  const q = ancestor('blockquote:not(.webkit-indent-blockquote)');
+  if (q) {
+    const p = q.parentNode;
+    while (q.firstChild) p.insertBefore(q.firstChild, q);
+    p.removeChild(q);
+  } else {
+    document.execCommand('formatBlock', false, 'blockquote');
+  }
+  changed();
+}
+function clearFormat() { restore(); document.execCommand('removeFormat'); document.execCommand('unlink'); changed(); }
+
+// 第一行：字体 / 字号 / B I U / 颜色 / 对齐 / 列表 / 缩进 / 引用 / 删除线 / 清除格式
+const fontBtn = mk(fmt, 'font', '<span>无衬线</span>' + ICON.caret.replace('<svg', '<svg class="caret"'), '字体', (b) => openPop('font', b), 'wide');
+const sizeBtn = mk(fmt, 'size', '<span style="font-weight:600">T<small>T</small></span>' + ICON.caret.replace('<svg', '<svg class="caret"'), '字号', (b) => openPop('size', b));
+sep(fmt);
+mk(fmt, 'bold', ICON.bold, '粗体 ⌘B', () => exec('bold'));
+mk(fmt, 'italic', ICON.italic, '斜体 ⌘I', () => exec('italic'));
+mk(fmt, 'underline', ICON.underline, '下划线 ⌘U', () => exec('underline'));
+mk(fmt, 'strike', ICON.strike, '删除线', () => exec('strikeThrough'));
+mk(fmt, 'color', '<span style="font-weight:700;border-bottom:3px solid currentColor;line-height:1.1" id="colbar">A</span>' + ICON.caret.replace('<svg', '<svg class="caret"'), '文字颜色 / 背景色', (b) => openPop('color', b));
+sep(fmt);
+mk(fmt, 'align', ICON.left + ICON.caret.replace('<svg', '<svg class="caret"'), '对齐方式', (b) => openPop('align', b));
+mk(fmt, 'ol', ICON.ol, '编号列表', () => exec('insertOrderedList'));
+mk(fmt, 'ul', ICON.ul, '项目符号列表', () => exec('insertUnorderedList'));
+mk(fmt, 'outdent', ICON.outdent, '减少缩进', () => exec('outdent'));
+mk(fmt, 'indent', ICON.indent, '增加缩进', () => exec('indent'));
+mk(fmt, 'quote', ICON.quote, '引用', toggleQuote);
+sep(fmt);
+mk(fmt, 'clear', ICON.clear, '清除格式', clearFormat);
+
+// 第二行：Aa 格式栏开关 / 链接 / 表情 / 图片
+const aa = mk(act, 'aa', '<span style="font-size:14px;font-weight:600">Aa</span>', '格式选项', () => { fmt.style.display = fmt.style.display === 'none' ? 'flex' : 'none'; aa.classList.toggle('on', fmt.style.display !== 'none'); closePop(); });
+aa.classList.add('on');
+mk(act, 'link', ICON.link, '插入链接 ⌘K', (b) => openPop('link', b));
+mk(act, 'emoji', ICON.smile, '插入表情', (b) => openPop('emoji', b));
+mk(act, 'img', ICON.image, '插入图片', () => { closePop(); post({ t: 'pickImage' }); });
+
+function refresh() {
+  if (!document.hasFocus() && pop.classList.contains('show')) return;
+  const q = (c) => { try { return document.queryCommandState(c); } catch (e) { return false; } };
+  ['bold', 'italic', 'underline'].forEach((k) => btns[k].classList.toggle('on', q(k)));
+  btns.strike.classList.toggle('on', q('strikeThrough'));
+  btns.ol.classList.toggle('on', q('insertOrderedList'));
+  btns.ul.classList.toggle('on', q('insertUnorderedList'));
+  btns.quote.classList.toggle('on', !!ancestor('blockquote:not(.webkit-indent-blockquote)'));
+  btns.link.classList.toggle('on', !!ancestor('a'));
+  const al = q('justifyCenter') ? 'center' : q('justifyRight') ? 'right' : q('justifyFull') ? 'justify' : 'left';
+  btns.align.innerHTML = ICON[al] + ICON.caret.replace('<svg', '<svg class="caret"');
+  let fam = '';
+  try { fam = (document.queryCommandValue('fontName') || '').replace(/['"]/g, ''); } catch (e) {}
+  const f = FONTS.find((x) => x[1].toLowerCase() === fam.toLowerCase());
+  btns.font.firstChild.textContent = f ? f[0] : '无衬线';
+}
+
+// ───────── 弹层 ─────────
+let popKind = null;
+function closePop() { pop.classList.remove('show'); pop.innerHTML = ''; popKind = null; }
+function place(anchor) {
+  pop.style.visibility = 'hidden'; pop.classList.add('show');
+  const r = anchor.getBoundingClientRect(), w = pop.offsetWidth, h = pop.offsetHeight;
+  let left = Math.max(8, Math.min(r.left, innerWidth - w - 8));
+  let top = r.top - h - 6;
+  if (top < 8) top = Math.min(r.bottom + 6, innerHeight - h - 8);
+  pop.style.left = left + 'px'; pop.style.top = Math.max(8, top) + 'px'; pop.style.visibility = 'visible';
+}
+function menuPop(items, cur, onPick) {
+  const m = document.createElement('div'); m.className = 'menu';
+  items.forEach(([label, val, style]) => {
+    const d = document.createElement('div'); d.className = 'item' + (String(val) === String(cur) ? ' cur' : '');
+    d.textContent = label; if (style) d.setAttribute('style', style);
+    d.addEventListener('mousedown', (e) => e.preventDefault());
+    d.addEventListener('click', () => { closePop(); onPick(val); });
+    m.appendChild(d);
+  });
+  return m;
+}
+const EMOJI = {
+  '😀': '😀😃😄😁😆😅🤣😂🙂🙃😉😊😇🥰😍🤩😘😗😚😙😋😛😜🤪😝🤑🤗🤭🤫🤔🤐🤨😐😑😶😏😒🙄😬🤥😌😔😪🤤😴😷🤒🤕🤢🤮🤧🥵🥶🥴😵🤯🤠🥳😎🤓🧐😕😟🙁😮😯😲😳🥺😦😧😨😰😥😢😭😱😖😣😞😓😩😫🥱😤😡😠🤬😈👿💀💩🤡👻👽🤖',
+  '👍': '👍👎👌✌🤞🤟🤘🤙👈👉👆👇☝✋🤚🖐🖖👋🤝🙏💪👏🙌👐🤲✍🤳💅👀👁🧠👂👃👄👶🧒👦👧🧑👨👩🧓👴👵🙋🙆🙅🤷🤦💁🙇',
+  '❤': '❤🧡💛💚💙💜🖤🤍🤎💔❣💕💞💓💗💖💘💝💟💯💢💥💫💦💨🕳💬💭💤✨🌟⭐🔥🎉🎊🎈🎁🏆🥇🎯',
+  '🐶': '🐶🐱🐭🐹🐰🦊🐻🐼🐨🐯🦁🐮🐷🐸🐵🙈🙉🙊🐔🐧🐦🐤🦆🦅🦉🦇🐺🐗🐴🦄🐝🐛🦋🐌🐞🐜🐢🐍🦎🐙🦑🦐🦀🐡🐠🐟🐬🐳🐋🦈🐊🐘🦒🦓🐎🐕🐈🌵🎄🌲🌳🌴🌱🌿🍀🍁🍂🍃🌷🌹🌺🌸🌼🌻🌞🌝🌙⭐🌈☀⛅☁❄⚡🌊',
+  '🍎': '🍎🍐🍊🍋🍌🍉🍇🍓🍈🍒🍑🥭🍍🥥🥝🍅🍆🥑🥦🥕🌽🌶🥔🍠🥐🍞🥖🧀🥚🍳🥞🥓🥩🍗🍖🌭🍔🍟🍕🥪🌮🌯🥗🍝🍜🍲🍛🍣🍱🥟🍤🍙🍚🍘🍥🍢🍡🍧🍨🍦🥧🍰🎂🍮🍭🍬🍫🍿🍩🍪☕🍵🥤🍺🍻🥂🍷🥃🍸🍹🍾',
+  '⚽': '⚽🏀🏈⚾🎾🏐🏉🎱🏓🏸🥅🏒🏑🥍🏏⛳🏹🎣🥊🥋🎽🛹⛸🎿🏂🏋🤸🏊🚴🧘🎮🎲🎯🎳🎭🎨🎬🎤🎧🎼🎹🥁🎷🎺🎸🎻',
+  '🚗': '🚗🚕🚙🚌🚎🏎🚓🚑🚒🚚🚜🛵🏍🚲🛴🚂🚆🚄🚅✈🛫🛬🚀🛸🚁⛵🚤🛳⚓🏠🏡🏢🏥🏦🏫🏰🗼🗽⛪🕌🗻🏔🏝🏖⛺🌃🌆🌇🌉',
+  '💡': '💡🔦📱💻🖥⌨🖱💾📷📹🎥📞☎📺📻⏰⌛⏳💰💵💳💎🔧🔨⚙🔒🔓🔑📦📫📧✉📝📄📃📑📊📈📉📌📎✂🗂📅📆🗑🔍🔎🔔🎵',
+  '✔': '✔✅❌❎⭕❗❓‼⁉⚠🚫🔴🟠🟡🟢🔵🟣⚫⚪🔶🔷➕➖➗✖♻💲™©®➡⬅⬆⬇↗↘↙↖↔↕🔄🔃🔙🔚🔛🔜🔝'
+};
+function emojiList(s) { return Array.from(s).filter((c) => c !== '️'); }
+function openPop(kind, anchor) {
+  if (popKind === kind) { closePop(); return; }
+  closePop(); popKind = kind;
+  if (kind === 'font') {
+    const cur = btns.font.firstChild.textContent;
+    pop.appendChild(menuPop(FONTS.map(([l, v]) => [l, l, 'font-family:' + JSON.stringify(v) + ',sans-serif']), cur, (l) => exec('fontName', FONTS.find((x) => x[0] === l)[1])));
+  } else if (kind === 'size') {
+    pop.appendChild(menuPop(SIZES.map(([l, v]) => [l, v, 'font-size:' + Math.min(v, 20) + 'px']), 14, setSize));
+  } else if (kind === 'align') {
+    const m = [['左对齐', 'justifyLeft'], ['居中', 'justifyCenter'], ['右对齐', 'justifyRight'], ['两端对齐', 'justifyFull']];
+    pop.appendChild(menuPop(m, '', (c) => exec(c)));
+  } else if (kind === 'color') {
+    const mkGrid = (title, cmd) => {
+      const t = document.createElement('div'); t.className = 'pop-title'; t.textContent = title; pop.appendChild(t);
+      const g = document.createElement('div'); g.className = 'colors';
+      COLORS.forEach((c) => {
+        const i = document.createElement('i'); i.style.background = c; i.title = c;
+        i.addEventListener('mousedown', (e) => e.preventDefault());
+        i.addEventListener('click', () => { closePop(); exec(cmd, c); if (cmd === 'foreColor') $('#colbar').style.color = c; });
+        g.appendChild(i);
+      });
+      pop.appendChild(g);
+    };
+    mkGrid('文字颜色', 'foreColor'); mkGrid('背景色', 'hiliteColor');
+  } else if (kind === 'emoji') {
+    const box = document.createElement('div'); box.className = 'emojis';
+    const tabs = document.createElement('div'); tabs.className = 'tabs';
+    const grid = document.createElement('div'); grid.className = 'grid';
+    const show = (k, t) => {
+      tabs.querySelectorAll('.btn').forEach((b) => b.classList.toggle('on', b === t));
+      grid.innerHTML = '';
+      emojiList(EMOJI[k]).forEach((ch) => {
+        const s = document.createElement('span'); s.textContent = ch;
+        s.addEventListener('mousedown', (e) => e.preventDefault());
+        s.addEventListener('click', () => { closePop(); restore(); document.execCommand('insertText', false, ch); changed(); });
+        grid.appendChild(s);
+      });
+    };
+    Object.keys(EMOJI).forEach((k, i) => {
+      const b = document.createElement('button'); b.className = 'btn'; b.type = 'button'; b.textContent = k;
+      b.addEventListener('mousedown', (e) => e.preventDefault());
+      b.addEventListener('click', () => show(k, b));
+      tabs.appendChild(b); if (i === 0) setTimeout(() => show(k, b), 0);
+    });
+    box.appendChild(tabs); box.appendChild(grid); pop.appendChild(box);
+  } else if (kind === 'link') {
+    openLink();
+  }
+  place(anchor);
+  const f = pop.querySelector('input'); if (f) { f.focus(); f.select(); }
+}
+function normUrl(u) {
+  u = u.trim(); if (!u) return '';
+  if (/^(https?:|mailto:|tel:)/i.test(u)) return u;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(u)) return '';
+  if (/^[^\s@\/]+@[^\s@\/]+\.[^\s@\/]+$/.test(u)) return 'mailto:' + u;
+  return 'https://' + u;
+}
+function openLink() {
+  const a = ancestor('a');
+  const selText = a ? a.textContent : (saved ? saved.toString() : '');
+  const f = document.createElement('div'); f.className = 'linkf';
+  f.innerHTML = '<div><label>显示的文字</label><input id="lk-t" spellcheck="false"></div><div><label>链接地址</label><input id="lk-u" placeholder="https://" spellcheck="false"></div>' +
+    '<div class="row"><button class="pbtn link grow" id="lk-rm" type="button" style="text-align:left">移除链接</button><button class="pbtn" id="lk-no" type="button">取消</button><button class="pbtn primary" id="lk-ok" type="button">应用</button></div>';
+  pop.appendChild(f);
+  const t = f.querySelector('#lk-t'), u = f.querySelector('#lk-u');
+  t.value = selText; u.value = a ? a.getAttribute('href') || '' : '';
+  f.querySelector('#lk-rm').style.visibility = a ? 'visible' : 'hidden';
+  const apply = () => {
+    const href = normUrl(u.value);
+    if (!href) { u.style.borderColor = '#d33'; u.focus(); return; }
+    const text = t.value.trim() || href;
+    closePop(); restore();
+    const cur = ancestor('a');
+    if (cur) {
+      cur.setAttribute('href', href);
+      if (text !== cur.textContent) cur.textContent = text;
+    } else if (saved && !saved.collapsed && text === saved.toString()) {
+      document.execCommand('createLink', false, href);
+    } else {
+      document.execCommand('insertHTML', false, '<a href="' + esc(href) + '">' + esc(text) + '</a>&nbsp;');
+    }
+    changed();
+  };
+  f.querySelector('#lk-ok').addEventListener('click', apply);
+  f.querySelector('#lk-no').addEventListener('click', () => { closePop(); restore(); });
+  f.querySelector('#lk-rm').addEventListener('click', () => { closePop(); restore(); const cur = ancestor('a'); if (cur) { const r = document.createRange(); r.selectNodeContents(cur); const s = getSelection(); s.removeAllRanges(); s.addRange(r); } document.execCommand('unlink'); changed(); });
+  f.addEventListener('keydown', (e) => { if (e.isComposing || e.keyCode === 229) return; if (e.key === 'Enter') { e.preventDefault(); apply(); } });
+}
+document.addEventListener('mousedown', (e) => { if (popKind && !pop.contains(e.target)) closePop(); });
+window.addEventListener('blur', () => { /* 窗口失焦不关弹层 */ });
+
+// ───────── 键盘 ─────────
+function autolink() {
+  const s = getSelection();
+  if (!s.isCollapsed || !s.anchorNode || s.anchorNode.nodeType !== 3) return;
+  if (s.anchorNode.parentElement.closest('a')) return;
+  const t = s.anchorNode.textContent.slice(0, s.anchorOffset);
+  const m = t.match(/(https?:\/\/[^\s<>]+|www\.[a-z0-9-]+\.[a-z]{2,}[^\s<>]*)$/i);
+  if (!m) return;
+  const r = document.createRange();
+  r.setStart(s.anchorNode, s.anchorOffset - m[0].length); r.setEnd(s.anchorNode, s.anchorOffset);
+  s.removeAllRanges(); s.addRange(r);
+  document.execCommand('createLink', false, /^https?:/i.test(m[0]) ? m[0] : 'https://' + m[0]);
+  const a = ancestor('a', s.anchorNode.nodeType === 3 ? s.anchorNode.parentNode : s.anchorNode) || (s.focusNode && ancestor('a', s.focusNode.nodeType === 3 ? s.focusNode.parentNode : s.focusNode));
+  const r2 = document.createRange();
+  if (a) r2.setStartAfter(a); else { r2.selectNodeContents(ed); r2.collapse(false); }
+  r2.collapse(true); s.removeAllRanges(); s.addRange(r2);
+}
+document.addEventListener('keydown', (e) => {
+  if (e.isComposing || e.keyCode === 229) return;
+  const mod = e.metaKey || e.ctrlKey;
+  if (mod && e.key === 'Enter') { e.preventDefault(); flush(); post({ t: 'send' }); return; }
+  if (e.key === 'Escape') { e.preventDefault(); if (popKind) { closePop(); restore(); } else { flush(); post({ t: 'cancel' }); } return; }
+  if (!ed.contains(document.activeElement) && document.activeElement !== ed) return;
+  if (mod && !e.shiftKey && e.key.toLowerCase() === 'k') { e.preventDefault(); openPop('link', btns.link); return; }
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    if (ancestor('li')) exec(e.shiftKey ? 'outdent' : 'indent'); else post({ t: e.shiftKey ? 'backtab' : 'tab' });
+    return;
+  }
+  if ((e.key === ' ' || e.key === 'Enter') && !mod) autolink();
+}, true);
+ed.addEventListener('focus', () => post({ t: 'focus' }));
+$('#scroll').addEventListener('mousedown', (e) => { if (e.target === $('#scroll')) { e.preventDefault(); restore(); const r = document.createRange(); r.selectNodeContents(ed); r.collapse(false); const s = getSelection(); s.removeAllRanges(); s.addRange(r); } });
+ed.addEventListener('click', (e) => {
+  ed.querySelectorAll('img.sel').forEach((i) => i.classList.remove('sel'));
+  if (e.target.tagName === 'IMG') { e.target.classList.add('sel'); const r = document.createRange(); r.selectNode(e.target); const s = getSelection(); s.removeAllRanges(); s.addRange(r); }
+  if (e.target.closest && e.target.closest('a')) e.preventDefault();
+});
+
+// ───────── 粘贴 / 拖入 ─────────
+const ALLOW = new Set(['B', 'STRONG', 'I', 'EM', 'U', 'S', 'STRIKE', 'DEL', 'A', 'BR', 'P', 'DIV', 'UL', 'OL', 'LI', 'BLOCKQUOTE', 'SPAN', 'FONT', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'CODE', 'PRE', 'SUB', 'SUP', 'TABLE', 'TBODY', 'THEAD', 'TFOOT', 'TR', 'TD', 'TH', 'HR', 'CENTER']);
+const KEEP_STYLE = ['color', 'background-color', 'font-size', 'font-weight', 'font-style', 'text-decoration', 'font-family', 'text-align'];
+// 只有宿主生成的引用文档才认 data-token；粘贴进来的 HTML 一律不认，防止伪造 token 引用上传区里的别的文件
+let allowTok = false;
+function clean(node, out) {
+  node.childNodes.forEach((n) => {
+    if (n.nodeType === 3) { out.appendChild(document.createTextNode(n.nodeValue.replace(/[\uF700-\uF8FF]/g, ''))); return; }
+    if (n.nodeType !== 1) return;
+    const tag = n.tagName;
+    if (tag === 'IMG') {
+      const src = n.getAttribute('src') || '';
+      const tok = n.getAttribute('data-token') || '';
+      // 引用原邮件时由宿主收进上传区的图片：带 token，src 只是预览，不受大小限制
+      if (allowTok && /^[0-9A-Za-z-]+$/.test(tok) && /^data:image\//i.test(src)) { const im = document.createElement('img'); im.setAttribute('data-token', tok); im.setAttribute('src', src); out.appendChild(im); }
+      else if (/^data:image\/(png|jpe?g|gif|webp|bmp);base64,/i.test(src) && src.length <= 400000) { const im = document.createElement('img'); im.setAttribute('src', src); const al = n.getAttribute('alt'); if (al) im.setAttribute('alt', al); out.appendChild(im); }
+      else { const al = n.getAttribute('alt'); if (al) { const sp = document.createElement('span'); sp.textContent = '[' + al + ']'; out.appendChild(sp); } }
+      return;
+    }
+    if (['SCRIPT', 'STYLE', 'META', 'LINK', 'TITLE', 'HEAD', 'IFRAME', 'OBJECT', 'EMBED', 'SVG', 'VIDEO', 'AUDIO', 'FORM', 'INPUT', 'BUTTON', 'SELECT', 'TEXTAREA'].includes(tag)) return;
+    if (!ALLOW.has(tag)) {
+      clean(n, out);
+      return;
+    }
+    let el;
+    if (/^H[1-6]$/.test(tag)) { el = document.createElement('div'); el.style.fontWeight = '700'; }
+    else el = document.createElement(tag.toLowerCase());
+    if (tag === 'A') { const h = normUrl(n.getAttribute('href') || ''); if (h) el.setAttribute('href', h); }
+    const st = n.style;
+    if (st && tag !== 'A') KEEP_STYLE.forEach((p) => { const v = st.getPropertyValue(p); if (v && !/var\(|url\(|expression/i.test(v)) el.style.setProperty(p, v); });
+    clean(n, el); out.appendChild(el);
+  });
+}
+ed.addEventListener('paste', (e) => {
+  const cd = e.clipboardData; if (!cd) return;
+  const files = Array.from(cd.files || []);
+  if (files.length) { e.preventDefault(); sendFiles(files); return; }
+  const html = cd.getData('text/html');
+  if (html) {
+    e.preventDefault();
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const box = document.createElement('div'); clean(doc.body, box);
+    document.execCommand('insertHTML', false, box.innerHTML); changed();
+  } else {
+    const text = cd.getData('text/plain');
+    if (text) { e.preventDefault(); document.execCommand('insertText', false, text); changed(); }
+  }
+});
+function sendFiles(files) {
+  const MAX = 25 * 1024 * 1024; const items = []; let pending = files.length;
+  const done = () => { if (--pending === 0 && items.length) post({ t: 'files', items }); };
+  files.forEach((f) => {
+    if (f.size > MAX) { post({ t: 'toast', msg: f.name + '：单个附件不能超过 25 MB' }); done(); return; }
+    const r = new FileReader();
+    r.onload = () => { const s = String(r.result); items.push({ name: f.name || '粘贴的图片', mime: f.type, data: s.slice(s.indexOf(',') + 1) }); done(); };
+    r.onerror = () => done();
+    r.readAsDataURL(f);
+  });
+}
+const hasFiles = (e) => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
+document.addEventListener('dragover', (e) => { if (hasFiles(e)) { e.preventDefault(); document.body.classList.add('dragging'); } });
+document.addEventListener('dragleave', (e) => { if (!e.relatedTarget) document.body.classList.remove('dragging'); });
+document.addEventListener('drop', (e) => {
+  document.body.classList.remove('dragging');
+  if (hasFiles(e)) { e.preventDefault(); sendFiles(Array.from(e.dataTransfer.files)); }
+});
+
+// ───────── 给应用调用的接口 ─────────
+window.EM = {
+  focus(start) {
+    ed.focus({ preventScroll: true });
+    const r = document.createRange(); r.selectNodeContents(ed); r.collapse(!!start);
+    const s = getSelection(); s.removeAllRanges(); s.addRange(r); saved = r.cloneRange();
+    if (start) $('#scroll').scrollTop = 0;
+  },
+  insertText(text) { restore(); document.execCommand('insertText', false, text); changed(); },
+  insertImage(token, name, src) {
+    restore();
+    document.execCommand('insertHTML', false, '<img data-token="' + esc(token) + '" alt="' + esc(name) + '" src="' + esc(src) + '">');
+    changed();
+  },
+  html() { return serialize(); },
+  text() { return ed.innerText; },
+  exec(cmd, val) { exec(cmd, val); },
+  openLink() { restore(); openPop('link', btns.link); },
+};
+const qel = document.getElementById('quote');
+if (qel) {
+  try {
+    const q = JSON.parse(qel.textContent);
+    const doc = new DOMParser().parseFromString(q.html, 'text/html');
+    const box = document.createElement(q.bq ? 'blockquote' : 'div');
+    box.className = 'q';
+    allowTok = true; try { clean(doc.body, box); } finally { allowTok = false; }
+    ed.appendChild(box);
+    ed.appendChild(document.createElement('br'));
+    flush();
+  } catch (e) {}
+}
+checkEmpty();
+post({ t: 'ready' });
+})();
+</script>
+</body>
+</html>

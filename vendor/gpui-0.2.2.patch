@@ -1,0 +1,840 @@
+diff -ruN -x . gpui-0.2.2/src/elements/text.rs vendor/gpui/src/elements/text.rs
+--- gpui-0.2.2/src/elements/text.rs	2006-07-24 09:21:28
++++ vendor/gpui/src/elements/text.rs	2026-11-07 23:10:44
+@@ -2,7 +2,7 @@
+     ActiveTooltip, AnyView, App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId,
+     HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
+     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, TextOverflow,
+-    TextRun, TextStyle, TooltipId, WhiteSpace, Window, WrappedLine, WrappedLineLayout,
++    TextAlign, TextRun, TextStyle, TooltipId, WhiteSpace, Window, WrappedLine, WrappedLineLayout, px,
+     register_tooltip_mouse_handlers, set_tooltip_on_window,
+ };
+ use anyhow::Context as _;
+@@ -46,10 +46,10 @@
+         _inspector_id: Option<&InspectorElementId>,
+         bounds: Bounds<Pixels>,
+         text_layout: &mut Self::RequestLayoutState,
+-        _window: &mut Window,
++        window: &mut Window,
+         _cx: &mut App,
+     ) {
+-        text_layout.prepaint(bounds, self)
++        text_layout.prepaint(bounds, self, window)
+     }
+ 
+     fn paint(
+@@ -112,10 +112,10 @@
+         _inspector_id: Option<&InspectorElementId>,
+         bounds: Bounds<Pixels>,
+         text_layout: &mut Self::RequestLayoutState,
+-        _window: &mut Window,
++        window: &mut Window,
+         _cx: &mut App,
+     ) {
+-        text_layout.prepaint(bounds, self.as_ref())
++        text_layout.prepaint(bounds, self.as_ref(), window)
+     }
+ 
+     fn paint(
+@@ -279,10 +279,10 @@
+         _inspector_id: Option<&InspectorElementId>,
+         bounds: Bounds<Pixels>,
+         _: &mut Self::RequestLayoutState,
+-        _window: &mut Window,
++        window: &mut Window,
+         _cx: &mut App,
+     ) {
+-        self.layout.prepaint(bounds, &self.text)
++        self.layout.prepaint(bounds, &self.text, window)
+     }
+ 
+     fn paint(
+@@ -318,8 +318,27 @@
+     wrap_width: Option<Pixels>,
+     size: Option<Size<Pixels>>,
+     bounds: Option<Bounds<Pixels>>,
++    /// 绘制时使用的对齐方式；命中测试 / 光标定位需按同样的行偏移计算
++    align: TextAlign,
+ }
+ 
++/// 第 `row` 个视觉行（软换行后）按对齐方式相对 bounds 左边的水平偏移。
++fn aligned_row_offset(line: &WrappedLine, row: usize, align: TextAlign, align_width: Pixels) -> Pixels {
++    if matches!(align, TextAlign::Left) {
++        return px(0.);
++    }
++    let layout = &line.layout.unwrapped_layout;
++    let x_at = |b: &crate::WrapBoundary| layout.runs[b.run_ix].glyphs[b.glyph_ix].position.x;
++    let start = if row == 0 { px(0.) } else { line.wrap_boundaries.get(row - 1).map(x_at).unwrap_or(px(0.)) };
++    let end = line.wrap_boundaries.get(row).map(x_at).unwrap_or(layout.width);
++    let row_width = end - start;
++    match align {
++        TextAlign::Center => (align_width - row_width) / 2.0,
++        TextAlign::Right => align_width - row_width,
++        TextAlign::Left => px(0.),
++    }
++}
++
+ impl TextLayout {
+     fn layout(
+         &self,
+@@ -408,6 +427,7 @@
+                         wrap_width,
+                         size: Some(Size::default()),
+                         bounds: None,
++                        align: TextAlign::Left,
+                     });
+                     return Size::default();
+                 };
+@@ -426,6 +446,7 @@
+                     wrap_width,
+                     size: Some(size),
+                     bounds: None,
++                    align: TextAlign::Left,
+                 });
+ 
+                 size
+@@ -433,13 +454,14 @@
+         })
+     }
+ 
+-    fn prepaint(&self, bounds: Bounds<Pixels>, text: &str) {
++    fn prepaint(&self, bounds: Bounds<Pixels>, text: &str, window: &Window) {
+         let mut element_state = self.0.borrow_mut();
+         let element_state = element_state
+             .as_mut()
+             .with_context(|| format!("measurement has not been performed on {text}"))
+             .unwrap();
+         element_state.bounds = Some(bounds);
++        element_state.align = window.text_style().text_align;
+     }
+ 
+     fn paint(&self, text: &str, window: &mut Window, cx: &mut App) {
+@@ -502,7 +524,10 @@
+                 line_origin.y = line_bottom;
+                 line_start_ix += line.len() + 1;
+             } else {
+-                let position_within_line = position - line_origin;
++                let mut position_within_line = position - line_origin;
++                let rows = line.wrap_boundaries.len() + 1;
++                let row = ((position_within_line.y / line_height).floor().max(0.) as usize).min(rows - 1);
++                position_within_line.x -= aligned_row_offset(line, row, element_state.align, bounds.size.width);
+                 match line.index_for_position(position_within_line, line_height) {
+                     Ok(index_within_line) => return Ok(line_start_ix + index_within_line),
+                     Err(index_within_line) => return Err(line_start_ix + index_within_line),
+@@ -537,7 +562,10 @@
+                 continue;
+             } else {
+                 let ix_within_line = index - line_start_ix;
+-                return Some(line_origin + line.position_for_index(ix_within_line, line_height)?);
++                let mut p = line.position_for_index(ix_within_line, line_height)?;
++                let row = (p.y / line_height).floor().max(0.) as usize;
++                p.x += aligned_row_offset(line, row, element_state.align, bounds.size.width);
++                return Some(line_origin + p);
+             }
+         }
+ 
+diff -ruN -x . gpui-0.2.2/src/platform/linux/platform.rs vendor/gpui/src/platform/linux/platform.rs
+--- gpui-0.2.2/src/platform/linux/platform.rs	2006-07-24 09:21:28
++++ vendor/gpui/src/platform/linux/platform.rs	2026-11-07 23:10:44
+@@ -723,6 +723,7 @@
+             CursorStyle::DragLink => &["alias"],
+             CursorStyle::DragCopy => &["copy"],
+             CursorStyle::ContextualMenu => &["context-menu"],
++            CursorStyle::Move => &["move", "fleur", "all-scroll"],
+             CursorStyle::None => {
+                 #[cfg(debug_assertions)]
+                 panic!("CursorStyle::None should be handled separately in the client");
+diff -ruN -x . gpui-0.2.2/src/platform/linux/wayland.rs vendor/gpui/src/platform/linux/wayland.rs
+--- gpui-0.2.2/src/platform/linux/wayland.rs	2006-07-24 09:21:28
++++ vendor/gpui/src/platform/linux/wayland.rs	2026-11-07 23:10:44
+@@ -35,6 +35,7 @@
+             CursorStyle::DragLink => Shape::Alias,
+             CursorStyle::DragCopy => Shape::Copy,
+             CursorStyle::ContextualMenu => Shape::ContextMenu,
++            CursorStyle::Move => Shape::Move,
+             CursorStyle::None => {
+                 #[cfg(debug_assertions)]
+                 panic!("CursorStyle::None should be handled separately in the client");
+diff -ruN -x . gpui-0.2.2/src/platform/mac/events.rs vendor/gpui/src/platform/mac/events.rs
+--- gpui-0.2.2/src/platform/mac/events.rs	2006-07-24 09:21:28
++++ vendor/gpui/src/platform/mac/events.rs	2026-11-07 23:10:44
+@@ -213,6 +213,20 @@
+                         _ => None,
+                     }
+                 }
++                // 触摸板捏合缩放：转成带 ⌘ 的滚轮事件（向外捏 = 向上滚），与 ⌘ + 滚轮缩放共用同一条处理路径
++                NSEventType::NSEventTypeMagnify => window_height.map(|window_height| {
++                    let mut modifiers = read_modifiers(native_event);
++                    modifiers.platform = true;
++                    Self::ScrollWheel(ScrollWheelEvent {
++                        position: point(
++                            px(native_event.locationInWindow().x as f32),
++                            window_height - px(native_event.locationInWindow().y as f32),
++                        ),
++                        delta: ScrollDelta::Pixels(point(px(0.), px(native_event.magnification() as f32 * 250.))),
++                        touch_phase: TouchPhase::Moved,
++                        modifiers,
++                    })
++                }),
+                 NSEventType::NSScrollWheel => window_height.map(|window_height| {
+                     let phase = match native_event.phase() {
+                         NSEventPhase::NSEventPhaseMayBegin | NSEventPhase::NSEventPhaseBegan => {
+diff -ruN -x . gpui-0.2.2/src/platform/mac/platform.rs vendor/gpui/src/platform/mac/platform.rs
+--- gpui-0.2.2/src/platform/mac/platform.rs	2006-07-24 09:21:28
++++ vendor/gpui/src/platform/mac/platform.rs	2026-11-07 23:10:44
+@@ -749,6 +749,11 @@
+                     if let Some(prompt) = options.prompt {
+                         let _: () = msg_send![panel, setPrompt: ns_string(&prompt)];
+                     }
++                    if let Some(exts) = options.allowed_extensions.filter(|e| !e.is_empty()) {
++                        let items: Vec<id> = exts.iter().map(|e| ns_string(e)).collect();
++                        let types = NSArray::arrayWithObjects(nil, &items);
++                        let _: () = msg_send![panel, setAllowedFileTypes: types];
++                    }
+ 
+                     let _: () = msg_send![panel, beginWithCompletionHandler: block];
+                 }
+@@ -1004,6 +1009,7 @@
+                 CursorStyle::DragLink => msg_send![class!(NSCursor), dragLinkCursor],
+                 CursorStyle::DragCopy => msg_send![class!(NSCursor), dragCopyCursor],
+                 CursorStyle::ContextualMenu => msg_send![class!(NSCursor), contextualMenuCursor],
++                CursorStyle::Move => move_cursor(),
+                 CursorStyle::None => unreachable!(),
+             };
+ 
+@@ -1706,4 +1712,24 @@
+         platform.0.lock().pasteboard = unsafe { NSPasteboard::pasteboardWithUniqueName(nil) };
+         platform
+     }
++}
++
++/// 四向移动光标：AppKit 没有公开的 moveCursor（私有 `_moveCursor` 会抛异常），
++/// 改用 HIServices 自带的系统光标资源（WebKit 的 CSS `move` 同源），缺失时退回张开的手。
++fn move_cursor() -> id {
++    static CURSOR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
++    let ptr = *CURSOR.get_or_init(|| unsafe {
++        let path = "/System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/HIServices.framework/Versions/A/Resources/cursors/move/cursor.pdf";
++        let image: id = msg_send![class!(NSImage), alloc];
++        let image: id = msg_send![image, initWithContentsOfFile: ns_string(path)];
++        if image.is_null() {
++            return 0;
++        }
++        // 资源原尺寸偏大，按系统光标的 24pt 显示，热点在中心（info.plist 的 hotx/hoty = 12）
++        let _: () = msg_send![image, setSize: cocoa::foundation::NSSize::new(24., 24.)];
++        let cursor: id = msg_send![class!(NSCursor), alloc];
++        let cursor: id = msg_send![cursor, initWithImage: image hotSpot: cocoa::foundation::NSPoint::new(12., 12.)];
++        cursor as usize
++    });
++    if ptr == 0 { unsafe { msg_send![class!(NSCursor), openHandCursor] } } else { ptr as id }
+ }
+diff -ruN -x . gpui-0.2.2/src/platform/mac/text_system.rs vendor/gpui/src/platform/mac/text_system.rs
+--- gpui-0.2.2/src/platform/mac/text_system.rs	2006-07-24 09:21:28
++++ vendor/gpui/src/platform/mac/text_system.rs	2026-11-07 23:10:44
+@@ -22,7 +22,8 @@
+ use core_text::{
+     font::CTFont,
+     font_descriptor::{
+-        kCTFontSlantTrait, kCTFontSymbolicTrait, kCTFontWeightTrait, kCTFontWidthTrait,
++        kCTFontDefaultOrientation, kCTFontSlantTrait, kCTFontSymbolicTrait, kCTFontWeightTrait,
++        kCTFontWidthTrait,
+     },
+     line::CTLine,
+     string_attributes::kCTFontAttributeName,
+@@ -30,7 +31,6 @@
+ use font_kit::{
+     font::Font as FontKitFont,
+     handle::Handle,
+-    hinting::HintingOptions,
+     metrics::Metrics,
+     properties::{Style as FontkitStyle, Weight as FontkitWeight},
+     source::SystemSource,
+@@ -39,7 +39,6 @@
+ use parking_lot::{RwLock, RwLockUpgradableReadGuard};
+ use pathfinder_geometry::{
+     rect::{RectF, RectI},
+-    transform2d::Transform2F,
+     vector::{Vector2F, Vector2I},
+ };
+ use smallvec::SmallVec;
+@@ -64,13 +63,21 @@
+     system_source: SystemSource,
+     fonts: Vec<FontKitFont>,
+     font_selections: HashMap<Font, FontId>,
+-    font_ids_by_postscript_name: HashMap<String, FontId>,
++    /// [easymail patch] 同一个 PostScript 名可能对应字形表不同的多份字体
++    /// （CoreText 回退用的苹方 vs. PingFang.ttc 里的苹方），全部保留，按字形数区分。
++    font_ids_by_postscript_name: HashMap<String, SmallVec<[FontId; 2]>>,
+     font_ids_by_font_key: HashMap<FontKey, SmallVec<[FontId; 4]>>,
+     postscript_names_by_font_id: HashMap<FontId, String>,
++    /// 合成斜体：字体没有斜体字形（如 PingFang SC）时，给它配一个倾斜绘制的孪生 FontId
++    oblique_twins: HashMap<FontId, FontId>,
++    oblique_ids: collections::HashSet<FontId>,
+     /// UTF-16 indices of ZWNJS
+     zwnjs_scratch_space: Vec<usize>,
+ }
+ 
++/// 合成斜体的倾斜系数（约 12°，与 CoreText 的合成斜体一致）。
++const OBLIQUE_SKEW: f32 = 0.21;
++
+ impl MacTextSystem {
+     pub(crate) fn new() -> Self {
+         Self(RwLock::new(MacTextSystemState {
+@@ -81,6 +88,8 @@
+             font_ids_by_postscript_name: HashMap::default(),
+             font_ids_by_font_key: HashMap::default(),
+             postscript_names_by_font_id: HashMap::default(),
++            oblique_twins: HashMap::default(),
++            oblique_ids: Default::default(),
+             zwnjs_scratch_space: Vec::new(),
+         }))
+     }
+@@ -146,7 +155,13 @@
+                 },
+             )?;
+ 
+-            let font_id = candidates[ix];
++            let mut font_id = candidates[ix];
++            // 要斜体但字体族里没有斜体字形：用合成斜体
++            if font.style != FontStyle::Normal
++                && lock.fonts[font_id.0].properties().style == FontkitStyle::Normal
++            {
++                font_id = lock.oblique_twin(font_id);
++            }
+             lock.font_selections.insert(font.clone(), font_id);
+             Ok(font_id)
+         }
+@@ -285,7 +300,9 @@
+             font_ids.push(font_id);
+             let postscript_name = font.postscript_name().unwrap();
+             self.font_ids_by_postscript_name
+-                .insert(postscript_name.clone(), font_id);
++                .entry(postscript_name.clone())
++                .or_default()
++                .push(font_id);
+             self.postscript_names_by_font_id
+                 .insert(font_id, postscript_name);
+             self.fonts.push(font);
+@@ -301,14 +318,38 @@
+         self.fonts[font_id.0].glyph_for_char(ch).map(GlyphId)
+     }
+ 
++    /// 某字体的合成斜体孪生（同一个字体对象，绘制时倾斜）。
++    fn oblique_twin(&mut self, base: FontId) -> FontId {
++        if self.oblique_ids.contains(&base) {
++            return base;
++        }
++        if let Some(id) = self.oblique_twins.get(&base) {
++            return *id;
++        }
++        let id = FontId(self.fonts.len());
++        let font = self.fonts[base.0].clone();
++        self.fonts.push(font);
++        self.oblique_twins.insert(base, id);
++        self.oblique_ids.insert(id);
++        id
++    }
++
+     fn id_for_native_font(&mut self, requested_font: CTFont) -> FontId {
+         let postscript_name = requested_font.postscript_name();
+-        if let Some(font_id) = self.font_ids_by_postscript_name.get(&postscript_name) {
++        // [easymail patch] 同名字体按字形数挑出同一份，否则中文会画成另一份字体里的错字
++        let glyph_count = requested_font.glyph_count() as u32;
++        if let Some(font_id) = self
++            .font_ids_by_postscript_name
++            .get(&postscript_name)
++            .and_then(|ids| ids.iter().find(|id| self.fonts[id.0].glyph_count() == glyph_count))
++        {
+             *font_id
+         } else {
+             let font_id = FontId(self.fonts.len());
+             self.font_ids_by_postscript_name
+-                .insert(postscript_name.clone(), font_id);
++                .entry(postscript_name.clone())
++                .or_default()
++                .push(font_id);
+             self.postscript_names_by_font_id
+                 .insert(font_id, postscript_name);
+             self.fonts
+@@ -328,17 +369,29 @@
+     }
+ 
+     fn raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
+-        let font = &self.fonts[params.font_id.0];
+-        let scale = Transform2F::from_scale(params.scale_factor);
+-        Ok(font
+-            .raster_bounds(
+-                params.glyph_id.0,
+-                params.font_size.into(),
+-                scale,
+-                HintingOptions::None,
+-                font_kit::canvas::RasterizationOptions::GrayscaleAa,
+-            )?
+-            .into())
++        // [easymail patch] 用和 rasterize_glyph 相同字号的 CTFont 测量字形边界。
++        // font-kit 在基准字号量完再缩放，而系统字体会随字号切换光学尺寸
++        // （SF Text → SF Display），大标题字形会比位图宽，左侧被切掉一条。
++        let rect = self.fonts[params.font_id.0]
++            .native_font()
++            .clone_with_font_size(f32::from(params.font_size) as CGFloat)
++            .get_bounding_rects_for_glyphs(kCTFontDefaultOrientation, &[params.glyph_id.0 as CGGlyph]);
++        // 翻转为左上角原点，与 font-kit 一致
++        let rect = RectF::new(
++            Vector2F::new(rect.origin.x as f32, -(rect.origin.y + rect.size.height) as f32),
++            Vector2F::new(rect.size.width as f32, rect.size.height as f32),
++        );
++        let mut bounds: Bounds<DevicePixels> = (rect * params.scale_factor).round_out().to_i32().into();
++        if self.oblique_ids.contains(&params.font_id) {
++            // 倾斜后字形上半部右移、基线以下左移，左右各放宽
++            let top = bounds.origin.y.0 as f32;
++            let bottom = top + bounds.size.height.0 as f32;
++            let left = (OBLIQUE_SKEW * bottom.max(0.)).ceil() as i32 + 1;
++            let right = (OBLIQUE_SKEW * (-top).max(0.)).ceil() as i32 + 1;
++            bounds.origin.x.0 -= left;
++            bounds.size.width.0 += left + right;
++        }
++        Ok(bounds)
+     }
+ 
+     fn rasterize_glyph(
+@@ -403,10 +456,24 @@
+             cx.set_gray_fill_color(0.0, 1.0);
+             cx.set_allows_antialiasing(true);
+             cx.set_should_antialias(true);
++            // [easymail patch] 打开字体平滑，笔画粗细与原生 AppKit 文字一致
++            cx.set_allows_font_smoothing(true);
++            cx.set_should_smooth_fonts(true);
+             cx.set_allows_font_subpixel_positioning(true);
+             cx.set_should_subpixel_position_fonts(true);
+             cx.set_allows_font_subpixel_quantization(false);
+             cx.set_should_subpixel_quantize_fonts(false);
++            if self.oblique_ids.contains(&params.font_id) {
++                // 合成斜体：x' = x + k·y（y 向上，字形上部向右倾）
++                cx.concat_ctm(core_graphics::geometry::CGAffineTransform::new(
++                    1.0,
++                    0.0,
++                    OBLIQUE_SKEW as CGFloat,
++                    1.0,
++                    0.0,
++                    0.0,
++                ));
++            }
+             self.fonts[params.font_id.0]
+                 .native_font()
+                 .clone_with_font_size(f32::from(params.font_size) as CGFloat)
+@@ -438,12 +505,15 @@
+         self.zwnjs_scratch_space.clear();
+         // Construct the attributed string, converting UTF8 ranges to UTF16 ranges.
+         let mut string = CFMutableAttributedString::new();
++        // 使用合成斜体的文字区间（UTF-16，含插入的 ZWNJ），排版后把对应的字形映射回斜体孪生
++        let mut oblique_ranges: Vec<std::ops::Range<usize>> = Vec::new();
+         let mut max_ascent = 0.0f32;
+         let mut max_descent = 0.0f32;
+ 
+         {
+             let mut ix_converter = StringIndexConverter::new(&text);
+             let mut last_font_run = None;
++            oblique_ranges.clear();
+             for run in font_runs {
+                 let text = &text[ix_converter.utf8_ix..][..run.len];
+                 // if the fonts are the same, we need to disconnect the text with a ZWNJ
+@@ -466,6 +536,9 @@
+                 let utf16_end = string.char_len();
+ 
+                 let cf_range = CFRange::init(utf16_start, utf16_end - utf16_start);
++                if self.oblique_ids.contains(&run.font_id) {
++                    oblique_ranges.push(utf16_start as usize..utf16_end as usize);
++                }
+                 let font = &self.fonts[run.font_id.0];
+ 
+                 let font_metrics = font.metrics();
+@@ -495,18 +568,11 @@
+                     .downcast::<CTFont>()
+                     .unwrap()
+             };
+-            let font_id = self.id_for_native_font(font);
+-
+-            let mut glyphs = match runs.last_mut() {
+-                Some(run) if run.font_id == font_id => &mut run.glyphs,
+-                _ => {
+-                    runs.push(ShapedRun {
+-                        font_id,
+-                        glyphs: Vec::with_capacity(run.glyph_count().try_into().unwrap_or(0)),
+-                    });
+-                    &mut runs.last_mut().unwrap().glyphs
+-                }
+-            };
++            let base_font_id = self.id_for_native_font(font);
++            // 合成斜体的孪生字体与原字体是同一个 CTFont，CoreText 会把相邻文字并成一个 run，
++            // 所以逐个字形按它在原文中的位置决定是否倾斜
++            let oblique_font_id = (!oblique_ranges.is_empty() && !self.is_emoji(base_font_id))
++                .then(|| self.oblique_twin(base_font_id));
+             for ((&glyph_id, position), &glyph_utf16_ix) in run
+                 .glyphs()
+                 .iter()
+@@ -514,6 +580,17 @@
+                 .zip(run.string_indices().iter())
+             {
+                 let mut glyph_utf16_ix = usize::try_from(glyph_utf16_ix).unwrap();
++                let font_id = match oblique_font_id {
++                    Some(id) if oblique_ranges.iter().any(|r| r.contains(&glyph_utf16_ix)) => id,
++                    _ => base_font_id,
++                };
++                let glyphs = match runs.last_mut() {
++                    Some(run) if run.font_id == font_id => &mut run.glyphs,
++                    _ => {
++                        runs.push(ShapedRun { font_id, glyphs: Vec::new() });
++                        &mut runs.last_mut().unwrap().glyphs
++                    }
++                };
+                 let r = self
+                     .zwnjs_scratch_space
+                     .binary_search_by(|&it| it.cmp(&glyph_utf16_ix));
+diff -ruN -x . gpui-0.2.2/src/platform/mac/window.rs vendor/gpui/src/platform/mac/window.rs
+--- gpui-0.2.2/src/platform/mac/window.rs	2006-07-24 09:21:28
++++ vendor/gpui/src/platform/mac/window.rs	2026-11-12 00:06:41
+@@ -166,6 +166,10 @@
+                     handle_view_event as extern "C" fn(&Object, Sel, id),
+                 );
+                 decl.add_method(
++                    sel!(magnifyWithEvent:),
++                    handle_view_event as extern "C" fn(&Object, Sel, id),
++                );
++                decl.add_method(
+                     sel!(swipeWithEvent:),
+                     handle_view_event as extern "C" fn(&Object, Sel, id),
+                 );
+@@ -476,10 +480,12 @@
+     fn start_display_link(&mut self) {
+         self.stop_display_link();
+         unsafe {
+-            if !self
+-                .native_window
+-                .occlusionState()
+-                .contains(NSWindowOcclusionState::NSWindowOcclusionStateVisible)
++            // [easymail patch] EASYMAIL_FORCE_DRAW=1 时即使窗口被遮挡也继续绘制（仅用于自动化截图测试）
++            if std::env::var_os("EASYMAIL_FORCE_DRAW").is_none()
++                && !self
++                    .native_window
++                    .occlusionState()
++                    .contains(NSWindowOcclusionState::NSWindowOcclusionStateVisible)
+             {
+                 return;
+             }
+@@ -1353,6 +1359,18 @@
+             .detach();
+     }
+ 
++    /// [easymail patch] 透明标题栏下由应用自己的标题区域发起拖动窗口。
++    fn start_window_move(&self) {
++        let window = self.0.lock().native_window;
++        unsafe {
++            let app: id = msg_send![class!(NSApplication), sharedApplication];
++            let event: id = msg_send![app, currentEvent];
++            if event != nil {
++                let _: () = msg_send![window, performWindowDragWithEvent: event];
++            }
++        }
++    }
++
+     fn toggle_fullscreen(&self) {
+         let this = self.0.lock();
+         let window = this.native_window;
+@@ -1693,6 +1711,20 @@
+ 
+             drop(lock);
+ 
++            // [easymail patch] AppKit 会把方向键等带功能键标志的按键先以 performKeyEquivalent: 分发给整棵视图树。
++            // 此时若第一响应者是嵌入的原生子视图（如 WKWebView），不能用本视图的 inputContext 处理：
++            // 输入法会把 U+F700 之类的私有区字符当成文字提交给子视图（显示成方框）。只跑 GPUI 自己的快捷键回调。
++            if key_equivalent {
++                let is_first_responder = unsafe {
++                    let win: id = msg_send![this, window];
++                    let responder: id = if win.is_null() { nil } else { msg_send![win, firstResponder] };
++                    responder == this as *const Object as id
++                };
++                if !is_first_responder {
++                    return run_callback(PlatformInput::KeyDown(key_down_event));
++                }
++            }
++
+             let is_composing =
+                 with_input_handler(this, |input_handler| input_handler.marked_text_range())
+                     .flatten()
+@@ -1915,7 +1947,7 @@
+         {
+             lock.move_traffic_light();
+             lock.start_display_link();
+-        } else {
++        } else if std::env::var_os("EASYMAIL_FORCE_DRAW").is_none() {
+             lock.stop_display_link();
+         }
+     }
+diff -ruN -x . gpui-0.2.2/src/platform/windows/util.rs vendor/gpui/src/platform/windows/util.rs
+--- gpui-0.2.2/src/platform/windows/util.rs	2006-07-24 09:21:28
++++ vendor/gpui/src/platform/windows/util.rs	2026-11-07 23:10:44
+@@ -118,6 +118,7 @@
+     static SIZEWE: OnceLock<SafeCursor> = OnceLock::new();
+     static SIZENS: OnceLock<SafeCursor> = OnceLock::new();
+     static NO: OnceLock<SafeCursor> = OnceLock::new();
++    static SIZEALL: OnceLock<SafeCursor> = OnceLock::new();
+     let (lock, name) = match style {
+         CursorStyle::IBeam | CursorStyle::IBeamCursorForVerticalLayout => (&IBEAM, IDC_IBEAM),
+         CursorStyle::Crosshair => (&CROSS, IDC_CROSS),
+@@ -131,6 +132,7 @@
+         | CursorStyle::ResizeUpDown
+         | CursorStyle::ResizeRow => (&SIZENS, IDC_SIZENS),
+         CursorStyle::OperationNotAllowed => (&NO, IDC_NO),
++        CursorStyle::Move => (&SIZEALL, IDC_SIZEALL),
+         CursorStyle::None => return None,
+         _ => (&ARROW, IDC_ARROW),
+     };
+diff -ruN -x . gpui-0.2.2/src/platform.rs vendor/gpui/src/platform.rs
+--- gpui-0.2.2/src/platform.rs	2006-07-24 09:21:28
++++ vendor/gpui/src/platform.rs	2026-11-07 23:10:44
+@@ -1326,7 +1326,7 @@
+ }
+ 
+ /// The options that can be configured for a file dialog prompt
+-#[derive(Clone, Debug)]
++#[derive(Clone, Debug, Default)]
+ pub struct PathPromptOptions {
+     /// Should the prompt allow files to be selected?
+     pub files: bool,
+@@ -1336,6 +1336,8 @@
+     pub multiple: bool,
+     /// The prompt to show to a user when selecting a path
+     pub prompt: Option<SharedString>,
++    /// Only files with these extensions can be selected (others are shown greyed out); None allows all
++    pub allowed_extensions: Option<Vec<SharedString>>,
+ }
+ 
+ /// What kind of prompt styling to show
+@@ -1489,6 +1491,10 @@
+     /// corresponds to the CSS cursor value `context-menu`
+     ContextualMenu,
+ 
++    /// A four-way move cursor
++    /// corresponds to the CSS cursor value `move`
++    Move,
++
+     /// Hide the cursor
+     None,
+ }
+@@ -1778,10 +1784,14 @@
+             ImageFormat::Tiff => frames_for_image(&self.bytes, image::ImageFormat::Tiff)?,
+             ImageFormat::Svg => {
+                 let pixmap = svg_renderer.render_pixmap(&self.bytes, SvgSize::ScaleFactor(1.0))?;
++                let (width, height) = (pixmap.width(), pixmap.height());
++                let mut data = pixmap.take();
++                // Convert from RGBA to BGRA, like the other formats.
++                for pixel in data.chunks_exact_mut(4) {
++                    pixel.swap(0, 2);
++                }
+ 
+-                let buffer =
+-                    image::ImageBuffer::from_raw(pixmap.width(), pixmap.height(), pixmap.take())
+-                        .unwrap();
++                let buffer = image::ImageBuffer::from_raw(width, height, data).unwrap();
+ 
+                 SmallVec::from_elem(Frame::new(buffer), 1)
+             }
+diff -ruN -x . gpui-0.2.2/src/style.rs vendor/gpui/src/style.rs
+--- gpui-0.2.2/src/style.rs	2006-07-24 09:21:28
++++ vendor/gpui/src/style.rs	2026-11-07 23:10:44
+@@ -264,6 +264,9 @@
+     /// Equivalent to the Tailwind `grid-cols-<number>`
+     pub grid_cols: Option<u16>,
+ 
++    /// [easymail patch] 各列宽度权重（fr，负数为固定像素），设置后覆盖 `grid_cols` 的等分列
++    pub grid_col_weights: Option<Vec<f32>>,
++
+     /// The row span of this element
+     /// Equivalent to the Tailwind `grid-rows-<number>`
+     pub grid_rows: Option<u16>,
+@@ -771,6 +774,7 @@
+             opacity: None,
+             grid_rows: None,
+             grid_cols: None,
++            grid_col_weights: None,
+             grid_location: None,
+ 
+             #[cfg(debug_assertions)]
+diff -ruN -x . gpui-0.2.2/src/styled.rs vendor/gpui/src/styled.rs
+--- gpui-0.2.2/src/styled.rs	2006-07-24 09:21:28
++++ vendor/gpui/src/styled.rs	2026-11-07 23:10:44
+@@ -660,6 +660,12 @@
+         self
+     }
+ 
++    /// [easymail patch] 按权重设置各列宽度（fr）；负数表示固定像素宽度。
++    fn grid_col_weights(mut self, weights: Vec<f32>) -> Self {
++        self.style().grid_col_weights = Some(weights);
++        self
++    }
++
+     /// Sets the grid rows of this element.
+     fn grid_rows(mut self, rows: u16) -> Self {
+         self.style().grid_rows = Some(rows);
+diff -ruN -x . gpui-0.2.2/src/taffy.rs vendor/gpui/src/taffy.rs
+--- gpui-0.2.2/src/taffy.rs	2006-07-24 09:21:28
++++ vendor/gpui/src/taffy.rs	2026-11-07 23:10:44
+@@ -309,7 +309,7 @@
+             unit: &Option<u16>,
+         ) -> Vec<taffy::GridTemplateComponent<T>> {
+             // grid-template-columns: repeat(<number>, minmax(0, 1fr));
+-            unit.map(|count| vec![repeat(count, vec![minmax(length(0.0), fr(1.0))])])
++            unit.map(|count| vec![repeat(count, vec![minmax(length(0.0_f32), fr(1.0_f32))])])
+                 .unwrap_or_default()
+         }
+ 
+@@ -337,7 +337,14 @@
+             flex_grow: self.flex_grow,
+             flex_shrink: self.flex_shrink,
+             grid_template_rows: to_grid_repeat(&self.grid_rows),
+-            grid_template_columns: to_grid_repeat(&self.grid_cols),
++            grid_template_columns: match &self.grid_col_weights {
++                // [easymail patch] 按权重分配列宽：正数为 minmax(0, <w>fr)，负数为固定像素 -w
++                Some(ws) if !ws.is_empty() => ws
++                    .iter()
++                    .map(|w| if *w < 0.0 { length(-*w * scale_factor) } else { minmax(length(0.0_f32), fr(w.max(0.01))) })
++                    .collect(),
++                _ => to_grid_repeat(&self.grid_cols),
++            },
+             grid_row: self
+                 .grid_location
+                 .as_ref()
+diff -ruN -x . gpui-0.2.2/src/text_system/line.rs vendor/gpui/src/text_system/line.rs
+--- gpui-0.2.2/src/text_system/line.rs	2006-07-24 09:21:28
++++ vendor/gpui/src/text_system/line.rs	2026-11-07 23:10:44
+@@ -479,7 +479,6 @@
+                             },
+                             *background_color,
+                         ));
+-                        background_origin.x = origin.x;
+                         background_origin.y += line_height;
+                     }
+ 
+@@ -492,6 +491,10 @@
+                         wraps.peek(),
+                     );
+                     glyph_origin.y += line_height;
++                    // 跨行的背景从新一行的（对齐后）起点继续
++                    if let Some((background_origin, _)) = current_background.as_mut() {
++                        background_origin.x = glyph_origin.x;
++                    }
+                 }
+                 prev_glyph_position = glyph.position;
+ 
+@@ -543,12 +546,20 @@
+             }
+         }
+ 
+-        let mut last_line_end_x = origin.x + layout.width;
+-        if let Some(boundary) = wrap_boundaries.last() {
+-            let run = &layout.runs[boundary.run_ix];
+-            let glyph = &run.glyphs[boundary.glyph_ix];
+-            last_line_end_x -= glyph.position.x;
+-        }
++        // 最后一个视觉行的右端：对齐后的行起点 + 行宽
++        let last_row_start = wrap_boundaries
++            .last()
++            .map(|b| layout.runs[b.run_ix].glyphs[b.glyph_ix].position.x)
++            .unwrap_or(px(0.));
++        let last_line_end_x = aligned_origin_x(
++            origin,
++            align_width.unwrap_or(layout.width),
++            last_row_start,
++            &align,
++            layout,
++            None,
++        ) + layout.width
++            - last_row_start;
+ 
+         if let Some((mut background_origin, background_color)) = current_background.take() {
+             if last_line_end_x == background_origin.x {
+diff -ruN -x . gpui-0.2.2/src/text_system/line_layout.rs vendor/gpui/src/text_system/line_layout.rs
+--- gpui-0.2.2/src/text_system/line_layout.rs	2006-07-24 09:21:28
++++ vendor/gpui/src/text_system/line_layout.rs	2026-11-07 23:10:44
+@@ -170,7 +170,12 @@
+                     last_candidate_x = x;
+                 }
+             } else {
+-                if ch != ' ' && first_non_whitespace_ix.is_some() {
++                // [easymail patch] 避头尾，与 LineWrapper::wrap_line 一致。
++                if ch != ' '
++                    && first_non_whitespace_ix.is_some()
++                    && !LineWrapper::is_no_break_before(ch)
++                    && !LineWrapper::is_no_break_after(prev_ch)
++                {
+                     last_candidate_ix = Some(boundary);
+                     last_candidate_x = x;
+                 }
+diff -ruN -x . gpui-0.2.2/src/text_system/line_wrapper.rs vendor/gpui/src/text_system/line_wrapper.rs
+--- gpui-0.2.2/src/text_system/line_wrapper.rs	2006-07-24 09:21:28
++++ vendor/gpui/src/text_system/line_wrapper.rs	2026-11-07 23:10:44
+@@ -64,8 +64,13 @@
+                                 last_candidate_width = width;
+                             }
+                         } else {
+-                            // CJK may not be space separated, e.g.: `Hello world你好世界`
+-                            if c != ' ' && first_non_whitespace_ix.is_some() {
++                            // CJK may not be space separated, e.g.: `Hello world你好世界`.
++                            // [easymail patch] 避头尾：闭合标点不在行首，开标点不在行尾。
++                            if c != ' '
++                                && first_non_whitespace_ix.is_some()
++                                && !Self::is_no_break_before(c)
++                                && !Self::is_no_break_after(prev_c)
++                            {
+                                 last_candidate_ix = ix;
+                                 last_candidate_width = width;
+                             }
+@@ -163,6 +168,21 @@
+         line
+     }
+ 
++    /// [easymail patch] CJK closing punctuation that must not begin a line.
++    pub(crate) fn is_no_break_before(c: char) -> bool {
++        matches!(
++            c,
++            '，' | '。' | '、' | '：' | '；' | '！' | '？' | '）' | '】' | '》' | '」' | '』' | '〕'
++                | '〉' | '”' | '’' | '…' | '～' | '·' | '%' | ')' | ']' | '}' | '!' | '?'
++                | ';'
++        )
++    }
++
++    /// [easymail patch] CJK opening punctuation that must not end a line.
++    pub(crate) fn is_no_break_after(c: char) -> bool {
++        matches!(c, '（' | '【' | '《' | '「' | '『' | '〔' | '〈' | '“' | '‘' | '(' | '[' | '{')
++    }
++
+     /// Any character in this list should be treated as a word character,
+     /// meaning it can be part of a word that should not be wrapped.
+     pub(crate) fn is_word_char(c: char) -> bool {
+@@ -346,6 +366,27 @@
+                 strikethrough: None,
+             })
+             .collect()
++    }
++
++    /// [easymail patch] 避头尾。测试文字系统里每个字 9.6px，72px 一行放 7 个字。
++    #[test]
++    fn test_wrap_line_kinsoku() {
++        let mut wrapper = build_wrapper();
++        // 第 8 个字是逗号：不能落在第二行行首，连同「七」一起换到下一行
++        assert_eq!(
++            wrapper.wrap_line(&[LineFragment::text("一二三四五六七，八九")], px(72.)).collect::<Vec<_>>(),
++            &[Boundary::new("一二三四五六".len(), 0)],
++        );
++        // 第 7 个字是开括号：不能留在第一行行尾，跟着后面的字换行
++        assert_eq!(
++            wrapper.wrap_line(&[LineFragment::text("一二三四五六（七八")], px(72.)).collect::<Vec<_>>(),
++            &[Boundary::new("一二三四五六".len(), 0)],
++        );
++        // 没有标点时照常在第 7 个字后换行
++        assert_eq!(
++            wrapper.wrap_line(&[LineFragment::text("一二三四五六七八九")], px(72.)).collect::<Vec<_>>(),
++            &[Boundary::new("一二三四五六七".len(), 0)],
++        );
+     }
+ 
+     #[test]

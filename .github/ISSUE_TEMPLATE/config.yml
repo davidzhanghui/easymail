@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全问题
+    url: https://github.com/davidzhanghui/easymail/security/advisories/new
+    about: 请使用仓库 Security 页签的私密漏洞报告，不要公开提 issue

@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['docs/**', '**.md']
+  pull_request:
+    paths-ignore: ['docs/**', '**.md']
+
+jobs:
+  check:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust 工具链（版本见 rust-toolchain.toml）
+        run: rustup show
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      # 格式 + clippy + 单元测试 + GreenMail 端到端；界面端到端需要图形会话，CI 上跳过
+      - name: 下载 GreenMail（端到端测试用，带 sha256 校验）
+        run: scripts/fetch-greenmail.sh
+      - name: scripts/check.sh --no-ui
+        env:
+          EASYMAIL_REQUIRE_GREENMAIL: "1"
+        run: scripts/check.sh --no-ui
