@@ -2,7 +2,7 @@
 //!
 //! - 正文区域固定位置，WebView 自己滚动；GPUI 每帧把正文区域的窗口坐标同步过来（`show`）。
 //! - 内容禁用 JavaScript（`allowsContentJavaScript = false`），远程资源由文档里的 CSP 拦截，
-//!   和 just-mail 的「无脚本沙箱 iframe + CSP」等价。
+//!   效果等同「无脚本沙箱 iframe + CSP」。
 //! - 点链接：导航代理拦下来交给应用（浏览器打开 / mailto 写信），WebView 本身永远不跳转。
 //! - 原生视图压在 GPUI 画布之上，GPUI 的弹层 / 模态会被它盖住：有弹层时先截一张快照，
 //!   隐藏 WebView，由 GPUI 在原位置画快照（`freeze` / `thaw`），用户看不出差别。
@@ -92,6 +92,8 @@ fn make_view() -> (Retained<WKWebView>, Retained<NavDelegate>) {
     let mtm = mtm();
     unsafe {
         let config = WKWebViewConfiguration::new(mtm);
+        // 非持久化数据仓：放行远程图片后服务器种下的 cookie / 缓存只活在内存里，不会跨邮件、跨重启把你认出来
+        config.setWebsiteDataStore(&objc2_web_kit::WKWebsiteDataStore::nonPersistentDataStore(mtm));
         config.defaultWebpagePreferences().setAllowsContentJavaScript(false);
         let prefs = config.preferences();
         prefs.setJavaScriptCanOpenWindowsAutomatically(false);
@@ -258,10 +260,11 @@ pub(crate) async fn eval_of(v: Retained<WKWebView>, cx: &AsyncApp, js: &str) -> 
 
 // ───────────────────────────── 文档 ─────────────────────────────
 
-/// HTML 邮件文档：CSP 默认拦截远程资源（追踪像素），用户点「显示图片」后放行。与 just-mail 的 mailDocument 一致。
+/// HTML 邮件文档：CSP 默认拦截远程资源（追踪像素），用户点「显示图片」后放行。
 pub fn mail_document(html: &str, allow_remote: bool) -> String {
     let csp = if allow_remote {
-        "default-src 'none'; img-src * data: blob:; style-src 'unsafe-inline' *; font-src * data:; media-src * data:; form-action 'none'; base-uri 'none'"
+        // 「显示图片」只放行图片：外链样式表、字体、音视频仍然拦截（它们同样能用来追踪，且对阅读没有必要）
+        "default-src 'none'; img-src * data: blob:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'"
     } else {
         "default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'"
     };

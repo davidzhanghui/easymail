@@ -421,7 +421,7 @@ async fn e2e(t: &mut T, cx: &mut AsyncApp) {
         t.check("存在已发送文件夹", false);
     }
 
-    // 12. 草稿：Esc 直接丢弃；点「保存为草稿」才进草稿视图
+    // 12. 草稿：输入后自动保存；Esc 存为草稿再关；点「保存为草稿」同样进草稿视图
     let fill = |a: &mut MailApp, w: &mut Window, cx: &mut Context<MailApp>| {
         a.set_nav(Nav::View(View::Inbox), cx);
         a.compose_new(w, cx);
@@ -436,10 +436,15 @@ async fn e2e(t: &mut T, cx: &mut AsyncApp) {
     t.wait(cx, 300).await;
     t.key(cx, "escape");
     t.check("Esc 关闭写信窗口", t.until(cx, 5, |a, _| a.modal.is_none()).await);
-    t.wait(cx, 2500).await; // 以前 2 秒会自动存草稿
     t.with(cx, |a, _, cx| a.set_nav(Nav::View(View::Drafts), cx));
-    t.wait(cx, 300).await;
-    t.check("Esc 不存草稿", t.read(cx, |a, _| !a.drafts.iter().any(|d| d.subject == "没写完的草稿")).unwrap_or(false));
+    t.check("Esc 存为草稿", t.until(cx, 5, |a, _| a.drafts.iter().any(|d| d.subject == "没写完的草稿")).await);
+    // 删掉这份，再验证「保存为草稿」
+    t.with(cx, |a, _, cx| {
+        for d in a.drafts.clone().into_iter().filter(|d| d.subject == "没写完的草稿") {
+            let _ = crate::core::mailer::delete_draft(&a.store, d.id.unwrap_or(0), false);
+        }
+        a.load_list(false, false, cx);
+    });
     t.with(cx, fill);
     t.wait(cx, 300).await;
     t.with(cx, |a, _, cx| {

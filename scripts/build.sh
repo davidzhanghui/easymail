@@ -75,10 +75,12 @@ if [ "$DEBUG" = 1 ]; then
   step "编译 debug ${VERSION}（本机架构，增量）"
   cargo build ${FEATURES[@]+"${FEATURES[@]}"}
   BIN=target/debug/easymail
+  CLI=target/debug/easymail-cli
 elif [ "$NATIVE" = 1 ]; then
   step "编译 release ${VERSION}（本机架构）"
   cargo build --release ${FEATURES[@]+"${FEATURES[@]}"}
   BIN=target/release/easymail
+  CLI=target/release/easymail-cli
 else
   export CARGO_TARGET_DIR=target/universal
   if [ -n "$UNI_RUSTC" ]; then export RUSTC="$UNI_RUSTC"; fi
@@ -92,12 +94,17 @@ else
   lipo -create -output "$BIN" target/universal/aarch64-apple-darwin/release/easymail target/universal/x86_64-apple-darwin/release/easymail
   strip -x "$BIN"
   lipo -info "$BIN" | sed 's/^/  /'
+  CLI=target/universal/easymail-cli-universal
+  lipo -create -output "$CLI" target/universal/aarch64-apple-darwin/release/easymail-cli target/universal/x86_64-apple-darwin/release/easymail-cli
+  strip -x "$CLI"
 fi
 
 step "组装 ${APP}"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/EasyMail"
+# 命令行 + 只读 MCP 服务器（见 README「命令行与 MCP」）
+cp "$CLI" "$APP/Contents/MacOS/easymail-cli"
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cat >"$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

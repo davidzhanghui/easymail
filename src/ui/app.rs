@@ -1,4 +1,4 @@
-//! 主窗口：顶栏 + 侧栏 + 邮件列表 + 阅读区，外加弹层、模态与提示条。对应 just-mail 的 App.jsx。
+//! 主窗口：顶栏 + 侧栏 + 邮件列表 + 阅读区，外加弹层、模态与提示条。
 
 use super::accounts::{AccountsEvent, AccountsModal, Tab};
 use super::composer::{build_reply, Composer, ComposerEvent};
@@ -22,10 +22,17 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod list;
+mod modal;
+pub(crate) mod panels;
+mod pop;
+pub(crate) mod reader;
+mod sidebar;
+
 const PAGE: usize = 60;
 const ROW_H: f32 = 84.;
 
-pub const VIEWS: [View; 7] = [View::Inbox, View::Unread, View::Starred, View::Attachments, View::Sent, View::Drafts, View::All];
+pub const VIEWS: [View; 9] = [View::Inbox, View::Unread, View::Starred, View::Snoozed, View::Attachments, View::Invoices, View::Sent, View::Drafts, View::All];
 
 pub fn view_label(v: View) -> &'static str {
     match v {
@@ -36,6 +43,8 @@ pub fn view_label(v: View) -> &'static str {
         View::Sent => "已发送",
         View::Drafts => "草稿",
         View::All => "全部邮件",
+        View::Snoozed => "稍后处理",
+        View::Invoices => "发票",
     }
 }
 
@@ -48,6 +57,8 @@ fn view_icon(v: View) -> &'static str {
         View::Sent => "sent",
         View::Drafts => "draft",
         View::All => "mail",
+        View::Snoozed => "clock",
+        View::Invoices => "receipt",
     }
 }
 
@@ -67,6 +78,10 @@ pub enum DetailState {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Pop {
+    /// 稍后处理的时间选择
+    Snooze(Vec<i64>),
+    /// 工具菜单（备份、瘦身、发件人、隐私报告…）
+    Tools,
     Theme,
     Export,
     Move(Vec<i64>),
@@ -91,6 +106,8 @@ pub enum Modal {
         size: u64,
         path: std::path::PathBuf,
     },
+    /// 工具面板（发件人视图、隐私报告、发件箱、规则…）
+    Panel(panels::Panel),
 }
 
 #[derive(Clone)]
@@ -103,6 +120,20 @@ pub struct Toast {
     pub id: u64,
     pub msg: String,
     pub error: bool,
+    pub action: Option<ToastAction>,
+}
+
+/// 提示条上的按钮
+#[derive(Clone, Debug, PartialEq)]
+pub enum ToastAction {
+    /// 撤销最近一次移动 / 删除（⌘Z 同效）
+    Undo,
+    /// 撤回发件箱里还没发出的信
+    Unsend(i64),
+    /// 在浏览器中打开链接（新版本下载页等）
+    Open(String),
+    /// 复制文字（验证码）
+    Copy(String),
 }
 
 pub struct MailApp {
@@ -130,6 +161,10 @@ pub struct MailApp {
     pub detail: Option<Rc<Detail>>,
     /// (邮件 id, HTML 长度, 是否引用了远程资源)：正则只在换信时跑一次，不是每帧
     remote_cache: Option<(i64, usize, bool)>,
+    /// 阅读区的提示信息（验证码、行程、认证结果、钓鱼链接…），换信时算一次
+    extras: Option<(i64, usize, Rc<reader::Extras>)>,
+    /// 列表按会话合并（kv `threads`）
+    pub threads: bool,
     /// load_meta 的请求代号：只应用最新一次后台查询的结果
     meta_gen: u64,
     pub detail_state: DetailState,
@@ -148,8 +183,7 @@ pub struct MailApp {
     /// 阅读区折叠：列表占满右侧
     reader_collapsed: bool,
     pub modal: Option<Modal>,
-    snap: Option<Arc<Image>>,
-    snapping: bool,
+    freeze: super::freeze::Freeze,
     doc: Option<(u64, Arc<str>)>,
     list_scroll: UniformListScrollHandle,
     refresh_task: Option<Task<()>>,
@@ -164,6 +198,15 @@ pub struct MailApp {
 impl MailApp {
     pub fn new(eng: Engine, rx: futures::channel::mpsc::UnboundedReceiver<Evt>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let store = eng.store().clone();
+        let threads = store.get_kv("threads").as_deref() == Some("1");
+        // 上次的分栏宽度 / 阅读区折叠状态（kv `layout` = "sidebar,list,collapsed"）
+        let layout = store
+            .get_kv("layout")
+            .and_then(|s| {
+                let v: Vec<&str> = s.split(',').collect();
+                Some((v.first()?.parse::<f32>().ok()?.clamp(160., 420.), v.get(1)?.parse::<f32>().ok()?.clamp(280., 720.), v.get(2) == Some(&"1")))
+            })
+            .unwrap_or((220., 380., false));
         let pref = store
             .get_kv("theme")
             .and_then(|s| serde_json::from_str::<(String, String, String)>(&s).ok())
@@ -257,6 +300,8 @@ impl MailApp {
             checked: BTreeSet::new(),
             detail: None,
             remote_cache: None,
+            extras: None,
+            threads,
             meta_gen: 0,
             detail_state: DetailState::Idle,
             remote_ok: HashSet::new(),
@@ -267,13 +312,12 @@ impl MailApp {
             toast_seq: 0,
             pop: None,
             pop_closed_at: Instant::now(),
-            sidebar_w: 220.,
-            list_w: 380.,
+            sidebar_w: layout.0,
+            list_w: layout.1,
             resizing: None,
-            reader_collapsed: false,
+            reader_collapsed: layout.2,
             modal: None,
-            snap: None,
-            snapping: false,
+            freeze: Default::default(),
             doc: None,
             list_scroll: UniformListScrollHandle::new(),
             refresh_task: None,
@@ -370,6 +414,7 @@ impl MailApp {
             },
             Nav::View(v) => p.view = if self.q.is_empty() { v } else { View::All },
         }
+        p.threads = self.threads && !self.is_drafts();
         if self.q.is_empty() {
             p.filter = self.filter;
         } else {
@@ -404,7 +449,8 @@ impl MailApp {
         let cursor = if append { self.next } else { None };
         let store = self.store.clone();
         let p = self.params();
-        let task = cx.background_spawn(async move { queries::list(&store, &p, cursor, limit) });
+        // 加载更早的一页不重新计数（大库上 COUNT 是列表里最慢的一步）
+        let task = cx.background_spawn(async move { queries::list_page(&store, &p, cursor, limit, !append) });
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let r = task.await;
             this.update(cx, |a, cx| {
@@ -420,7 +466,9 @@ impl MailApp {
                         } else {
                             a.items = page.items;
                         }
-                        a.total = page.total;
+                        if page.total >= 0 {
+                            a.total = page.total;
+                        }
                         a.next = page.next;
                         let ids: HashSet<i64> = a.items.iter().map(|m| m.id).collect();
                         a.checked.retain(|id| ids.contains(id));
@@ -488,9 +536,19 @@ impl MailApp {
             Evt::Synced { .. } | Evt::Accounts => self.soft_refresh(cx),
             Evt::NewMail { email, count, from, subject, .. } => {
                 let msg = format!("{email} 收到 {count} 封新邮件");
-                self.toast(msg.clone(), false, cx);
                 let body = if count == 1 && !subject.is_empty() { format!("{from}：{subject}") } else { msg.clone() };
-                macos::notify("新邮件", &body);
+                // 主题里就带验证码的（多数短信式通知邮件如此）：通知标题直接显示，提示条给「复制」
+                let code = if count == 1 { crate::core::extract::verification_code(&subject, "") } else { None };
+                match &code {
+                    Some(c) => {
+                        self.toast_with(format!("验证码 {c}（{from}）"), false, Some(ToastAction::Copy(c.clone())), cx);
+                        macos::notify(&format!("验证码 {c}"), &body);
+                    }
+                    None => {
+                        self.toast(msg.clone(), false, cx);
+                        macos::notify("新邮件", &body);
+                    }
+                }
                 self.last_newmail = Some(msg);
                 self.soft_refresh(cx);
             }
@@ -500,14 +558,27 @@ impl MailApp {
     }
 
     pub fn toast(&mut self, msg: impl Into<String>, error: bool, cx: &mut Context<Self>) {
+        self.toast_with(msg, error, None, cx);
+    }
+
+    /// 带按钮的提示条：撤销 / 撤回类的提示停留到撤销窗口结束
+    pub fn toast_with(&mut self, msg: impl Into<String>, error: bool, action: Option<ToastAction>, cx: &mut Context<Self>) {
         self.toast_seq += 1;
         let id = self.toast_seq;
-        self.toasts.push(Toast { id, msg: msg.into(), error });
+        let ms = match &action {
+            Some(ToastAction::Undo) => crate::core::pending::undo_window().max(3200) as u64,
+            Some(ToastAction::Unsend(_)) => (crate::core::outbox::undo_secs(&self.store) * 1000).max(3200) as u64,
+            Some(ToastAction::Open(_)) => 12000,
+            Some(ToastAction::Copy(_)) => 15000,
+            None if error => 6000,
+            None => 3200,
+        };
+        self.toasts.push(Toast { id, msg: msg.into(), error, action });
         if self.toasts.len() > 4 {
             self.toasts.remove(0);
         }
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            cx.background_executor().timer(Duration::from_millis(if error { 6000 } else { 3200 })).await;
+            cx.background_executor().timer(Duration::from_millis(ms)).await;
             this.update(cx, |a, cx| {
                 a.toasts.retain(|t| t.id != id);
                 cx.notify();
@@ -554,6 +625,117 @@ impl MailApp {
                 a.load_meta(cx);
             }
         });
+    }
+
+    /// 同 run_op，成功后的提示带「撤销」按钮（撤销窗口内有效）
+    fn run_op_undo<T: Send + 'static>(
+        &mut self,
+        fut: impl Future<Output = anyhow::Result<T>> + Send + 'static,
+        ok: impl FnOnce(&T) -> String + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.run(fut, cx, move |a, r, cx| match r {
+            Ok(v) => {
+                let undoable = a.eng.peek_last_undo().is_some_and(|u| crate::core::db::now_ms() - u.at < 2_000);
+                a.toast_with(ok(&v), false, undoable.then_some(ToastAction::Undo), cx);
+                a.load_meta(cx);
+            }
+            Err(e) => {
+                a.toast(e.to_string(), true, cx);
+                a.load_list(true, false, cx);
+                a.load_meta(cx);
+            }
+        });
+    }
+
+    /// ⌘Z / 提示条「撤销」
+    pub fn undo(&mut self, cx: &mut Context<Self>) {
+        self.toasts.retain(|t| t.action != Some(ToastAction::Undo));
+        let eng = self.eng.clone();
+        self.run(crate::core::ops::undo_last(eng), cx, |a, r, cx| {
+            match r {
+                Ok((label, _)) => a.toast(format!("已撤销「{label}」"), false, cx),
+                Err(e) => a.toast(e.to_string(), true, cx),
+            }
+            a.load_meta(cx);
+            a.load_list(true, false, cx);
+        });
+    }
+
+    /// 撤回发件箱里的信：信回到草稿，重新打开写信窗口
+    pub fn unsend(&mut self, outbox_id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        self.toasts.retain(|t| t.action != Some(ToastAction::Unsend(outbox_id)));
+        match crate::core::outbox::cancel(&self.store, outbox_id) {
+            Ok(draft) => {
+                self.toast("已撤回，信已放回草稿", false, cx);
+                if let Some(d) = draft.and_then(|id| mailer::get_draft(&self.store, id).ok().flatten()) {
+                    self.open_composer(d, window, cx);
+                }
+            }
+            Err(e) => self.toast(e.to_string(), true, cx),
+        }
+        self.load_meta(cx);
+    }
+
+    fn end_resize(&mut self) {
+        if self.resizing.take().is_some() {
+            self.save_layout();
+        }
+    }
+
+    pub fn save_layout(&self) {
+        self.store.set_kv("layout", &format!("{:.0},{:.0},{}", self.sidebar_w, self.list_w, if self.reader_collapsed { 1 } else { 0 }));
+    }
+
+    /// 启动后的一次性检查：上次是否异常退出、有没有新版本
+    pub fn startup_checks(&mut self, cx: &mut Context<Self>) {
+        let log = self.store.dir().join("panic.log");
+        if let Ok(mtime) = std::fs::metadata(&log).and_then(|m| m.modified()) {
+            let at = mtime.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+            let seen: i64 = self.store.get_kv("panic_seen_at").and_then(|v| v.parse().ok()).unwrap_or(0);
+            if at > seen {
+                self.store.set_kv("panic_seen_at", &at.to_string());
+                if seen > 0 || at > crate::core::db::now_ms() - 7 * 86_400_000 {
+                    self.toast_with(
+                        "上次运行时程序异常退出了，详细信息记录在数据目录的 panic.log，欢迎附上它到 GitHub 提 issue",
+                        true,
+                        Some(ToastAction::Open(format!("file://{}", log.display()))),
+                        cx,
+                    );
+                }
+            }
+        }
+        self.check_update(false, cx);
+    }
+
+    /// 当前搜索加入 / 移出「保存的搜索」（显示在侧栏）
+    pub fn toggle_saved_search(&mut self, cx: &mut Context<Self>) {
+        let q = self.q.trim().to_string();
+        if q.is_empty() {
+            return;
+        }
+        let mut v = panels::load_saved(&self.store);
+        if let Some(i) = v.iter().position(|x| *x == q) {
+            v.remove(i);
+            self.toast("已从保存的搜索中移除", false, cx);
+        } else {
+            v.push(q);
+            self.toast("已保存到侧栏", false, cx);
+        }
+        panels::save_saved(&self.store, &v);
+        cx.notify();
+    }
+
+    fn toast_click(&mut self, action: ToastAction, window: &mut Window, cx: &mut Context<Self>) {
+        match action {
+            ToastAction::Undo => self.undo(cx),
+            ToastAction::Unsend(id) => self.unsend(id, window, cx),
+            ToastAction::Open(url) => cx.open_url(&url),
+            ToastAction::Copy(text) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                self.toast("已复制", false, cx);
+            }
+        }
     }
 
     // ───────────────────────── 导航 ─────────────────────────
@@ -730,17 +912,19 @@ impl MailApp {
         if ids.is_empty() {
             return;
         }
+        // 会被彻底删除（无法恢复）的：本地归档、已在垃圾箱 / 垃圾邮件里的、所在账号没有垃圾箱的
         let local_ids: HashSet<i64> = self.accounts.iter().filter(|a| a.is_local()).map(|a| a.id).collect();
-        let locals = self.items.iter().filter(|m| ids.contains(&m.id) && local_ids.contains(&m.account_id)).count()
-            + self.detail.as_ref().filter(|d| ids.contains(&d.id) && d.account_local && !self.items.iter().any(|m| m.id == d.id)).map_or(0, |_| 1);
-        if locals > 0 {
-            let answer = window.prompt(
-                PromptLevel::Warning,
-                &format!("其中 {locals} 封来自「本地归档」，删除后无法恢复。"),
-                Some("邮箱服务器里的邮件不受影响。确认删除？"),
-                &["删除", "取消"],
-                cx,
-            );
+        let mut rows: Vec<(i64, i64, String)> =
+            self.items.iter().filter(|m| ids.contains(&m.id)).map(|m| (m.id, m.account_id, m.folder_role.clone())).collect();
+        if let Some(d) = self.detail.as_ref().filter(|d| ids.contains(&d.id) && !rows.iter().any(|r| r.0 == d.id)) {
+            rows.push((d.id, d.account_id, d.folder_role.clone()));
+        }
+        let purge = rows.iter().filter(|(_, acc, role)| local_ids.contains(acc) || role == "trash" || role == "junk" || !self.has_role(*acc, "trash")).count();
+        if purge > 0 {
+            let all = purge == rows.len();
+            let title = if all { format!("彻底删除 {purge} 封邮件？") } else { format!("其中 {purge} 封会被彻底删除") };
+            let detail = "这些邮件已在垃圾箱 / 垃圾邮件里，或来自「本地归档」、所在邮箱没有垃圾箱，删除后无法恢复，也不能撤销。";
+            let answer = window.prompt(PromptLevel::Warning, &title, Some(detail), &["彻底删除", "取消"], cx);
             cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                 if answer.await.ok() == Some(0) {
                     this.update(cx, |a, cx| a.do_delete(ids, cx)).ok();
@@ -756,7 +940,7 @@ impl MailApp {
         self.remove_from_list(&ids, cx);
         let n = ids.len();
         let eng = self.eng.clone();
-        self.run_op(
+        self.run_op_undo(
             ops::delete_messages(eng, ids),
             move |r| {
                 if r.purged > 0 && r.trashed == 0 {
@@ -774,13 +958,13 @@ impl MailApp {
         self.pop = None;
         self.remove_from_list(&ids, cx);
         let eng = self.eng.clone();
-        self.run_op(ops::move_messages(eng, ids, folder_id), move |_| format!("已移动到「{label}」"), cx);
+        self.run_op_undo(ops::move_messages(eng, ids, folder_id), move |_| format!("已移动到「{label}」"), cx);
     }
 
     pub fn to_role(&mut self, ids: Vec<i64>, role: &'static str, msg: &'static str, cx: &mut Context<Self>) {
         self.remove_from_list(&ids, cx);
         let eng = self.eng.clone();
-        self.run_op(async move { ops::move_to_role(eng, ids, role).await }, move |_| msg.into(), cx);
+        self.run_op_undo(async move { ops::move_to_role(eng, ids, role).await }, move |_| msg.into(), cx);
     }
 
     fn has_role(&self, account_id: i64, role: &str) -> bool {
@@ -840,6 +1024,22 @@ impl MailApp {
                 ComposerEvent::Sent(r) => {
                     this.modal = None;
                     this.toast(format!("已发送{}", if r.saved_to_sent { " · 已存入「已发送」" } else { "" }), false, cx);
+                }
+                ComposerEvent::Queued { outbox_id, send_at, scheduled } => {
+                    this.modal = None;
+                    let secs = (send_at - crate::core::db::now_ms()).max(0) / 1000;
+                    if *scheduled {
+                        this.toast_with(
+                            format!("已定时：{} 发出（在「发件箱」里可撤回）", fmt_full(*send_at)),
+                            false,
+                            Some(ToastAction::Unsend(*outbox_id)),
+                            cx,
+                        );
+                    } else if secs > 0 {
+                        this.toast_with(format!("{secs} 秒后发送"), false, Some(ToastAction::Unsend(*outbox_id)), cx);
+                    } else {
+                        this.toast("正在发送…", false, cx);
+                    }
                 }
                 ComposerEvent::Toast(m, err) => {
                     this.toast(m.clone(), *err, cx);
@@ -929,20 +1129,25 @@ impl MailApp {
         if name.is_empty() {
             return;
         }
-        let r = match action {
-            PromptAction::NewFolder { account_id, parent } => ops::create_folder(&self.store, account_id, &name, parent).map(|_| "文件夹已创建"),
-            PromptAction::Rename { folder_id } => ops::rename_folder(&self.store, folder_id, &name).map(|_| "已重命名"),
-        };
-        match r {
-            Ok(m) => {
-                self.modal = None;
-                window.focus(&self.focus);
-                self.toast(m, false, cx);
-                self.load_meta(cx);
-                self.load_list(true, false, cx);
+        let eng = self.eng.clone();
+        let fut: std::pin::Pin<Box<dyn Future<Output = anyhow::Result<&'static str>> + Send>> = match action {
+            PromptAction::NewFolder { account_id, parent } => {
+                Box::pin(async move { ops::create_folder_any(eng, account_id, name, parent).await.map(|_| "文件夹已创建") })
             }
-            Err(e) => self.toast(e.to_string(), true, cx),
-        }
+            PromptAction::Rename { folder_id } => Box::pin(async move { ops::rename_folder_any(eng, folder_id, name).await.map(|_| "已重命名") }),
+        };
+        self.run(fut, cx, |a, r, cx| match r {
+            Ok(m) => {
+                if matches!(a.modal, Some(Modal::Prompt { .. })) {
+                    a.modal = None;
+                }
+                a.toast(m, false, cx);
+                a.load_meta(cx);
+                a.load_list(true, false, cx);
+            }
+            Err(e) => a.toast(format!("{e:#}"), true, cx),
+        });
+        window.focus(&self.focus);
     }
 
     pub fn sync_now(&mut self, cx: &mut Context<Self>) {
@@ -969,6 +1174,7 @@ impl MailApp {
         self.pop = None;
         let Some(f) = self.folders.iter().find(|f| f.id == fid).cloned() else { return };
         let label = f.label();
+        let local = self.accounts.iter().any(|a| a.id == f.account_id && a.is_local());
         match action {
             "read-all" => {
                 let eng = self.eng.clone();
@@ -1004,7 +1210,11 @@ impl MailApp {
                 let answer = window.prompt(
                     PromptLevel::Warning,
                     &format!("删除文件夹「{label}」？"),
-                    Some("其中的邮件会一并从本机删除，无法恢复。"),
+                    Some(if local {
+                        "其中的邮件会一并从本机删除，无法恢复。"
+                    } else {
+                        "会在邮箱服务器上删除这个文件夹及其中的邮件，无法恢复。"
+                    }),
                     &["删除", "取消"],
                     cx,
                 );
@@ -1014,11 +1224,14 @@ impl MailApp {
                             if a.nav == Nav::Folder(fid) {
                                 a.set_nav(Nav::View(View::Inbox), cx);
                             }
-                            match ops::delete_folder(&a.store, fid) {
-                                Ok(()) => a.toast("文件夹已删除", false, cx),
-                                Err(e) => a.toast(e.to_string(), true, cx),
-                            }
-                            a.load_meta(cx);
+                            let eng = a.eng.clone();
+                            a.run(ops::delete_folder_any(eng, fid), cx, |a, r, cx| {
+                                match r {
+                                    Ok(()) => a.toast("文件夹已删除", false, cx),
+                                    Err(e) => a.toast(format!("{e:#}"), true, cx),
+                                }
+                                a.load_meta(cx);
+                            });
                         })
                         .ok();
                     }
@@ -1177,7 +1390,9 @@ impl MailApp {
                 win.update(cx, |_, window, cx| me.update(cx, |a, cx| a.compose_to(&addr, window, cx))).ok();
             });
         } else if url.starts_with("http://") || url.starts_with("https://") {
-            cx.open_url(url);
+            // 默认去掉 utm_* / fbclid 等跟踪参数再打开（设置里可关：kv strip_tracking = "0"）
+            let url = if self.store.get_kv("strip_tracking").as_deref() == Some("0") { url.to_string() } else { crate::core::extract::strip_tracking(url) };
+            cx.open_url(&url);
         }
     }
 
@@ -1253,30 +1468,18 @@ impl MailApp {
     /// 弹层 / 模态打开时把 WebView 冻结成快照（原生视图会盖住 GPUI 画的弹层）
     fn sync_freeze(&mut self, cx: &mut Context<Self>) {
         let want = self.overlay_open();
-        if !want {
-            if webview::is_frozen() {
-                webview::set_frozen(false);
-            }
-            self.snap = None;
-            return;
-        }
-        if !webview::is_live() || webview::is_frozen() || self.snapping {
-            return;
-        }
-        self.snapping = true;
-        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let png = webview::snapshot(cx).await;
-            this.update(cx, |a, cx| {
-                a.snapping = false;
-                if a.overlay_open() {
-                    a.snap = png.map(|b| Arc::new(Image::from_bytes(ImageFormat::Png, b)));
-                    webview::set_frozen(true);
-                }
-                cx.notify();
+        if let super::freeze::Step::Capture = self.freeze.sync(want) {
+            cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                let png = super::freeze::Freeze::capture(cx).await;
+                this.update(cx, |a, cx| {
+                    let still = a.overlay_open();
+                    a.freeze.finish(png, still);
+                    cx.notify();
+                })
+                .ok();
             })
-            .ok();
-        })
-        .detach();
+            .detach();
+        }
     }
 
     pub fn title(&self) -> String {
@@ -1295,12 +1498,16 @@ impl MailApp {
             _ => None,
         };
         if !self.q.is_empty() {
-            return format!("{} 封结果 · {}", fmt_num(self.total), folder.map(|f| format!("仅「{}」", f.label())).unwrap_or_else(|| "全部账号与文件夹".into()));
+            return format!(
+                "{} 封结果 · {}",
+                fmt_total(self.total),
+                folder.map(|f| format!("仅「{}」", f.label())).unwrap_or_else(|| "全部账号与文件夹".into())
+            );
         }
         if let Some(f) = folder {
             let acc = self.accounts.iter().find(|a| a.id == f.account_id);
             if self.virtual_folder(f.id).is_some() {
-                return format!("{} · {} 封（取自本地已同步的文件夹）", acc.map(|a| a.email.as_str()).unwrap_or(""), fmt_num(self.total));
+                return format!("{} · {} 封（取自本地已同步的文件夹）", acc.map(|a| a.email.as_str()).unwrap_or(""), fmt_total(self.total));
             }
             return if acc.is_some_and(|a| a.is_local()) {
                 format!("本地归档 · 共 {} 封（只在本机）", fmt_num(f.local))
@@ -1309,10 +1516,10 @@ impl MailApp {
             };
         }
         if self.is_drafts() {
-            return format!("{} 封草稿（保存在本机）", self.total);
+            return format!("{} 封草稿（保存在本机）", fmt_num(self.total));
         }
         let n = self.accounts.iter().filter(|a| !a.is_local()).count();
-        format!("{} 封邮件{}", fmt_num(self.total), if n > 1 { format!(" · {n} 个账号") } else { String::new() })
+        format!("{} 封邮件{}", fmt_total(self.total), if n > 1 { format!(" · {n} 个账号") } else { String::new() })
     }
 
     // ───────────────────────── 键盘 ─────────────────────────
@@ -1351,7 +1558,7 @@ impl MailApp {
                     self.modal = Some(Modal::Composer(c.clone()));
                     c.update(cx, |c, cx| c.close(window, cx));
                 }
-                Some(Modal::Prompt { .. }) | Some(Modal::Preview { .. }) | None => {}
+                Some(Modal::Prompt { .. }) | Some(Modal::Preview { .. }) | Some(Modal::Panel(_)) | None => {}
                 Some(m @ Modal::Import(_)) => {
                     if let Modal::Import(i) = &m {
                         if i.read(cx).busy() {
@@ -1497,1249 +1704,6 @@ impl MailApp {
             .child(div().w(px(1.)).h_full().bg(if on { hover } else { line }))
             .hover(move |s| s.bg(hover.opacity(0.15)))
     }
-
-    fn render_sidebar(&mut self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut col = div()
-            .flex()
-            .flex_col()
-            .min_h_full()
-            .px(px(12.))
-            .pt(px(16.))
-            .pb(px(18.))
-            .child(div().text_size(px(11.)).text_color(t.muted).px(px(10.)).mb(px(8.)).child("邮  件"));
-        for v in VIEWS {
-            let active = self.nav == Nav::View(v) && self.q.is_empty();
-            let n = match v {
-                View::Inbox => self.stats.inbox,
-                View::Unread => self.stats.unread,
-                View::Starred => self.stats.starred,
-                View::Drafts => self.stats.drafts,
-                _ => 0,
-            };
-            let strong = matches!(v, View::Inbox | View::Unread);
-            col = col.child(
-                div()
-                    .id(SharedString::from(format!("nav-{}", v.key())))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .h(px(H_ROW))
-                    .px(px(10.))
-                    .rounded(px(7.))
-                    .cursor_pointer()
-                    .text_size(px(13.))
-                    .text_color(if active { t.accent_deep } else { t.ink })
-                    .when(active, |d| d.bg(t.accent_soft).font_weight(FontWeight::SEMIBOLD))
-                    .hover(|s| s.bg(if active { t.accent_soft } else { t.row_hover }))
-                    .child(icon(view_icon(v), 14., if active { t.accent } else { t.muted }))
-                    .child(div().flex_1().child(view_label(v)))
-                    .when(n > 0, |d| {
-                        d.child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(if strong { t.accent_deep } else { t.muted })
-                                .when(strong, |d| d.font_weight(FontWeight::SEMIBOLD))
-                                .child(fmt_num(n)),
-                        )
-                    })
-                    .on_click(cx.listener(move |a, _, window, cx| {
-                        if !a.q.is_empty() {
-                            a.q.clear();
-                            a.search.update(cx, |s, cx| s.set_text("", cx));
-                        }
-                        a.set_nav(Nav::View(v), cx);
-                        window.focus(&a.focus);
-                    })),
-            );
-        }
-        col = col.child(div().text_size(px(11.)).text_color(t.muted).px(px(10.)).mt(px(20.)).mb(px(8.)).child("账  号"));
-        let accounts = self.accounts.clone();
-        for a in accounts.iter() {
-            let list: Vec<&Folder> = self.folders.iter().filter(|f| f.account_id == a.id).collect();
-            if a.is_local() && list.is_empty() {
-                continue;
-            }
-            let closed = self.collapsed.contains(&a.id);
-            let st = self.sync.get(&a.id).cloned().unwrap_or_default();
-            let aid = a.id;
-            let local = a.is_local();
-            col = col.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(2.))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("acct-{aid}")))
-                            .flex()
-                            .flex_1()
-                            .min_w_0()
-                            .items_center()
-                            .h(px(H_ROW))
-                            .px(px(8.))
-                            .rounded(px(7.))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(t.row_hover))
-                            .text_size(px(11.5))
-                            .text_color(t.ink_2)
-                            .child(
-                                div().mr(px(4.)).child(
-                                    icon("caret", 12., t.muted)
-                                        .when(closed, |s| s.with_transformation(Transformation::rotate(radians(-std::f32::consts::FRAC_PI_2)))),
-                                ),
-                            )
-                            .child(dot(t.named(&a.color), 7.).mr(px(7.)))
-                            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(if local {
-                                "本地归档".to_string()
-                            } else {
-                                a.email.clone()
-                            }))
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                if !app.collapsed.remove(&aid) {
-                                    app.collapsed.insert(aid);
-                                }
-                                let v: Vec<i64> = app.collapsed.iter().copied().collect();
-                                app.store.set_kv("collapsed", &serde_json::to_string(&v).unwrap_or_default());
-                                cx.notify();
-                            })),
-                    )
-                    .when(!local, |d| {
-                        d.child(
-                            button(SharedString::from(format!("acct-sync-{aid}")), t, Kind::Ghost, Some("refresh"), "", true)
-                                .text_color(if st.syncing { t.accent } else { t.muted })
-                                .on_click(cx.listener(move |app, _, _, cx| {
-                                    app.eng.request_sync(aid, None, true);
-                                    app.toast("已开始同步", false, cx);
-                                })),
-                        )
-                    })
-                    .child(
-                        button(SharedString::from(format!("acct-more-{aid}")), t, Kind::Ghost, Some("more"), "", true)
-                            .on_click(cx.listener(move |app, ev: &ClickEvent, _, cx| app.toggle_pop(Pop::Account(aid), ev.position(), cx))),
-                    ),
-            );
-            if closed {
-                continue;
-            }
-            if !a.last_error.is_empty() && !st.syncing {
-                col = col.child(div().px(px(10.)).pl(px(18.)).py(px(6.)).text_size(px(11.5)).text_color(t.danger).child(one_line(&a.last_error, 120)));
-            }
-            if list.is_empty() {
-                col = col.child(div().h(px(H_ROW)).flex().items_center().pl(px(18.)).text_size(px(12.)).text_color(t.muted).child(if st.syncing {
-                    "正在读取文件夹…"
-                } else {
-                    "尚未同步"
-                }));
-            }
-            for f in list.iter() {
-                let depth =
-                    list.iter().filter(|g| g.id != f.id && !g.delimiter.is_empty() && f.path.starts_with(&format!("{}{}", g.path, g.delimiter))).count();
-                let active = self.nav == Nav::Folder(f.id);
-                let fid = f.id;
-                let group = SharedString::from(format!("fg-{fid}"));
-                col = col.child(
-                    div()
-                        .id(SharedString::from(format!("folder-{fid}")))
-                        .group(group.clone())
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .h(px(H_ROW))
-                        .pl(px(18. + depth as f32 * 14.))
-                        .pr(px(4.))
-                        .rounded(px(7.))
-                        .cursor_pointer()
-                        .text_size(px(12.5))
-                        .text_color(if active {
-                            t.accent_deep
-                        } else if f.sync_enabled || local || self.virtual_folder(f.id).is_some() {
-                            t.ink
-                        } else {
-                            t.faint
-                        })
-                        .when(active, |d| d.bg(t.accent_soft).font_weight(FontWeight::SEMIBOLD))
-                        .hover(|s| s.bg(if active { t.accent_soft } else { t.row_hover }))
-                        .child(icon(role_icon(&f.role), 13., if active { t.accent } else { t.muted }))
-                        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(f.leaf()))
-                        // 未同步的文件夹（如 Gmail 的「所有邮件 / 重要」）本地没有邮件，不显示服务器未读数，免得点进去对不上
-                        .when(f.unseen > 0 && (f.sync_enabled || local), |d| {
-                            d.child(div().text_size(px(11.)).text_color(t.accent_deep).font_weight(FontWeight::SEMIBOLD).child(fmt_num(f.unseen)))
-                        })
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("folder-more-{fid}")))
-                                .size(px(22.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(5.))
-                                .opacity(0.)
-                                .group_hover(group, |s| s.opacity(1.))
-                                .hover(|s| s.bg(t.border_soft))
-                                .child(icon("more", 13., t.muted))
-                                .on_click(cx.listener(move |app, ev: &ClickEvent, _, cx| {
-                                    cx.stop_propagation();
-                                    app.toggle_pop(Pop::Folder(fid), ev.position(), cx)
-                                })),
-                        )
-                        .on_click(cx.listener(move |app, _, window, cx| {
-                            app.set_nav(Nav::Folder(fid), cx);
-                            window.focus(&app.focus);
-                        })),
-                );
-            }
-        }
-        let col = col
-            .child(div().flex_1().min_h(px(18.)))
-            .child(
-                button("side-import", t, Kind::Ghost, Some("download"), "导入邮件", true)
-                    .justify_start()
-                    .w_full()
-                    .on_click(cx.listener(|a, _, window, cx| a.open_import(window, cx))),
-            )
-            .child(
-                button("side-accounts", t, Kind::Ghost, Some("gear"), "账号与设置", true)
-                    .justify_start()
-                    .w_full()
-                    .mt(px(4.))
-                    .on_click(cx.listener(|a, _, window, cx| a.open_accounts(Tab::Accounts, false, window, cx))),
-            )
-            .child(div().px(px(10.)).pt(px(6.)).text_size(px(10.5)).text_color(t.faint).child(format!(
-                "本地存档 {} 封 · 已缓存正文 {} 封",
-                fmt_num(self.stats.archived),
-                fmt_num(self.stats.with_body)
-            )));
-        // 外层只负责滚动；内层 flex 列的子项一律不收缩（否则内容超高时条目会被压扁）
-        div().id("sidebar").flex_none().w(px(self.sidebar_w)).h_full().bg(t.panel_2).overflow_y_scroll().child(col)
-    }
-
-    fn render_list(&mut self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let folder = match self.nav {
-            Nav::Folder(id) => self.folders.iter().find(|f| f.id == id).cloned(),
-            _ => None,
-        };
-        let drafts = self.is_drafts();
-        let n_checked = self.checked.len();
-        let any_unread = self.items.iter().any(|m| self.checked.contains(&m.id) && !m.seen);
-        let any_unstarred = self.items.iter().any(|m| self.checked.contains(&m.id) && !m.flagged);
-        let all_checked = !self.items.is_empty() && self.items.iter().all(|m| self.checked.contains(&m.id));
-        let unified = (!matches!(self.nav, Nav::Folder(_)) && self.accounts.len() > 1) || !self.q.is_empty();
-        let syncing = self.sync.values().any(|s| s.syncing);
-        let head = div()
-            .flex_none()
-            .px(px(18.))
-            .pt(px(16.))
-            .pb(px(10.))
-            .border_b_1()
-            .border_color(t.border_soft)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.))
-                    .min_h(px(H_SM))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .font_family(SERIF)
-                            .text_size(px(21.))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(t.ink)
-                            .child(self.title()),
-                    )
-                    .when(folder.as_ref().is_some_and(|f| f.unseen > 0 && f.sync_enabled), |d| {
-                        let fid = folder.as_ref().map(|f| f.id).unwrap_or(0);
-                        d.child(
-                            button("mark-all", t, Kind::Ghost, Some("read"), "", true)
-                                .on_click(cx.listener(move |a, _, window, cx| a.folder_action("read-all", fid, window, cx))),
-                        )
-                    })
-                    .child(
-                        button("list-refresh", t, Kind::Ghost, Some("refresh"), "", true)
-                            .text_color(if syncing { t.accent } else { t.muted })
-                            .on_click(cx.listener(|a, _, _, cx| a.sync_now(cx))),
-                    )
-                    .when(self.reader_collapsed, |d| {
-                        d.child(button("expand-reader", t, Kind::Ghost, Some("panel-right"), "", true).on_click(cx.listener(|a, _, _, cx| {
-                            a.reader_collapsed = false;
-                            cx.notify();
-                        })))
-                    })
-                    .when(!drafts, |d| {
-                        d.child(
-                            button("list-export", t, Kind::Ghost, Some("download"), "", true)
-                                .on_click(cx.listener(|a, ev: &ClickEvent, _, cx| a.toggle_pop(Pop::Export, ev.position(), cx))),
-                        )
-                    }),
-            )
-            .child(div().text_size(px(11.5)).text_color(t.muted).mt(px(3.)).child(self.subtitle()))
-            .when(self.q.is_empty() && !drafts && n_checked == 0, |d| {
-                let mut row = div().flex().gap(px(6.)).mt(px(10.));
-                for (f, label) in [(Filter::All, "全部"), (Filter::Unread, "未读"), (Filter::Starred, "星标"), (Filter::Attachments, "附件")] {
-                    row = row.child(
-                        chip(SharedString::from(format!("filter-{label}")), t, label, self.filter == f)
-                            .on_click(cx.listener(move |a, _, _, cx| a.set_filter(f, cx))),
-                    );
-                }
-                d.child(row)
-            })
-            .when(n_checked > 0, |d| {
-                d.child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .items_center()
-                        .gap(px(4.))
-                        .mt(px(10.))
-                        .child(checkbox("check-all", t, all_checked).mr(px(4.)).on_click(cx.listener(move |a, _, _, cx| {
-                            if all_checked {
-                                a.checked.clear();
-                            } else {
-                                a.checked = a.items.iter().map(|m| m.id).collect();
-                            }
-                            cx.notify();
-                        })))
-                        .child(div().text_size(px(12.)).text_color(t.accent_deep).mr(px(4.)).child(format!("已选 {n_checked}")))
-                        .child(
-                            button("b-seen", t, Kind::Ghost, Some(if any_unread { "read" } else { "unread" }), if any_unread { "已读" } else { "未读" }, true)
-                                .on_click(cx.listener(move |a, _, _, cx| {
-                                    let ids: Vec<i64> = a.checked.iter().copied().collect();
-                                    a.set_seen(ids, any_unread, cx)
-                                })),
-                        )
-                        .child(
-                            button(
-                                "b-star",
-                                t,
-                                Kind::Ghost,
-                                Some(if any_unstarred { "star" } else { "star-fill" }),
-                                if any_unstarred { "星标" } else { "取消星标" },
-                                true,
-                            )
-                            .on_click(cx.listener(move |a, _, _, cx| {
-                                let ids: Vec<i64> = a.checked.iter().copied().collect();
-                                a.set_flagged(ids, any_unstarred, false, cx)
-                            })),
-                        )
-                        .child(button("b-move", t, Kind::Ghost, Some("move"), "移动", true).on_click(cx.listener(|a, ev: &ClickEvent, _, cx| {
-                            let ids: Vec<i64> = a.checked.iter().copied().collect();
-                            a.toggle_pop(Pop::Move(ids), ev.position(), cx)
-                        })))
-                        .child(button("b-del", t, Kind::Ghost, Some("trash"), "删除", true).text_color(t.danger).on_click(cx.listener(|a, _, window, cx| {
-                            let ids: Vec<i64> = a.checked.iter().copied().collect();
-                            a.delete(ids, window, cx)
-                        })))
-                        .child(button("b-cancel", t, Kind::Ghost, None, "取消", true).on_click(cx.listener(|a, _, _, cx| {
-                            a.checked.clear();
-                            cx.notify();
-                        }))),
-                )
-            });
-
-        let body = if drafts {
-            let mut col = div().id("draft-list").flex_1().overflow_y_scroll();
-            if self.drafts.is_empty() {
-                col = col.child(empty_list(t, "还没有草稿。"));
-            }
-            let emails: HashMap<i64, String> = self.accounts.iter().map(|a| (a.id, a.email.clone())).collect();
-            for d in self.drafts.clone() {
-                col = col.child(self.draft_row(t, d, &emails, cx));
-            }
-            col.into_any_element()
-        } else if self.items.is_empty() && self.drafts.is_empty() {
-            let unsynced = match self.nav {
-                Nav::Folder(id) if self.q.is_empty() && self.virtual_folder(id).is_none() => {
-                    self.folders.iter().any(|f| f.id == id && !f.sync_enabled && !self.accounts.iter().any(|a| a.id == f.account_id && a.is_local()))
-                }
-                _ => false,
-            };
-            let msg = if self.loading {
-                "正在读取…"
-            } else if unsynced {
-                "这个文件夹没有同步到本地。\nGmail 的「重要」等标签文件夹与收件箱内容重复，默认不同步；\n需要的话可在文件夹的「…」菜单里选「恢复同步此文件夹」。"
-            } else {
-                "这里空空如也，\n一封符合条件的邮件都没有。"
-            };
-            div().flex_1().child(empty_list(t, msg)).into_any_element()
-        } else {
-            let count = self.items.len() + usize::from(self.next.is_some());
-            let list = uniform_list(
-                "mail-list",
-                count,
-                cx.processor(move |a: &mut MailApp, range: std::ops::Range<usize>, _window, cx| {
-                    let t = theme(cx).clone();
-                    range.map(|ix| a.render_row(&t, ix, unified, cx).into_any_element()).collect::<Vec<_>>()
-                }),
-            )
-            .track_scroll(self.list_scroll.clone())
-            .flex_1();
-            if self.drafts.is_empty() {
-                list.into_any_element()
-            } else {
-                // 账号「草稿箱」：本机草稿排在服务器上的邮件之前
-                let emails: HashMap<i64, String> = self.accounts.iter().map(|a| (a.id, a.email.clone())).collect();
-                let mut col = div().id("folder-drafts").flex().flex_col().flex_1().min_h_0();
-                let mut dl = div().id("folder-draft-rows").flex_none().max_h(px(280.)).overflow_y_scroll();
-                for d in self.drafts.clone() {
-                    dl = dl.child(self.draft_row(t, d, &emails, cx));
-                }
-                col = col.child(dl);
-                if !self.items.is_empty() {
-                    col = col.child(list);
-                }
-                col.into_any_element()
-            }
-        };
-
-        div()
-            .flex()
-            .flex_col()
-            .h_full()
-            .min_h_0()
-            .bg(t.panel)
-            .map(|d| if self.reader_collapsed { d.flex_1().min_w_0() } else { d.flex_none().w(px(self.list_w)) })
-            .child(head)
-            .child(body)
-    }
-
-    /// 本机草稿行（草稿视图与账号「草稿箱」文件夹共用）
-    fn draft_row(&self, t: &Theme, d: Draft, emails: &HashMap<i64, String>, cx: &mut Context<Self>) -> Stateful<Div> {
-        let did = d.id.unwrap_or(0);
-        let acc = d.account_id.and_then(|i| emails.get(&i).cloned()).unwrap_or_else(|| "未选择账号".into());
-        div()
-            .id(SharedString::from(format!("draft-{did}")))
-            .px(px(18.))
-            .pl(px(34.))
-            .py(px(11.))
-            .border_b_1()
-            .border_color(t.border_soft)
-            .cursor_pointer()
-            .hover(|s| s.bg(t.row_hover))
-            .child(
-                div()
-                    .flex()
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .font_family(MONO)
-                            .text_size(px(12.))
-                            .text_color(t.ink_2)
-                            .child(if d.to.trim().is_empty() { "（未填收件人）".to_string() } else { format!("致 {}", d.to) }),
-                    )
-                    .child(div().text_size(px(11.)).text_color(t.muted).child(fmt_short(d.updated_at))),
-            )
-            .child(
-                div()
-                    .mt(px(3.))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .font_family(SERIF)
-                    .text_size(px(15.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(t.ink)
-                    .child(if d.subject.is_empty() { "(无主题)".to_string() } else { d.subject.clone() }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(6.))
-                    .mt(px(4.))
-                    .items_center()
-                    .child(badge(t, format!("草稿 · {acc}"), false))
-                    .when(!d.attachments.is_empty(), |x| x.child(badge(t, "附件", true)))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_size(px(12.))
-                            .text_color(t.muted)
-                            .child(one_line(&crate::core::mailer::body_snippet(&d.body), 120)),
-                    ),
-            )
-            .on_click(cx.listener(move |a, _, window, cx| a.open_composer(d.clone(), window, cx)))
-    }
-
-    fn render_row(&mut self, t: &Theme, ix: usize, unified: bool, cx: &mut Context<Self>) -> Stateful<Div> {
-        if ix >= self.items.len() {
-            return div().id("more").h(px(ROW_H)).flex().items_center().justify_center().child(
-                button("load-more", t, Kind::Secondary, None, if self.loading { "正在读取…" } else { "加载更早的邮件" }, true).on_click(cx.listener(
-                    |a, _, _, cx| {
-                        if !a.loading {
-                            a.load_list(false, true, cx)
-                        }
-                    },
-                )),
-            );
-        }
-        let m = &self.items[ix];
-        let id = m.id;
-        let selected = self.selected == Some(id);
-        let checked = self.checked.contains(&id);
-        let flagged = m.flagged;
-        let from = if m.folder_role == "sent" {
-            format!("致 {}", m.to.iter().map(|a| a.short().to_string()).collect::<Vec<_>>().join(", "))
-        } else {
-            m.from.short().to_string()
-        };
-        div()
-            .id(("row", id as u64))
-            .h(px(ROW_H))
-            .relative()
-            .pl(px(34.))
-            .pr(px(18.))
-            .pt(px(12.))
-            .border_b_1()
-            .border_color(t.border_soft)
-            .cursor_pointer()
-            .map(|d| {
-                if selected {
-                    d.bg(t.accent_soft).child(div().absolute().left_0().top_0().bottom_0().w(px(3.)).bg(t.accent))
-                } else if checked {
-                    d.bg(t.accent_soft.opacity(0.5))
-                } else {
-                    d.bg(if m.seen { t.panel_2 } else { t.panel }).hover(|s| s.bg(t.row_hover))
-                }
-            })
-            .when(!m.seen, |d| d.child(div().absolute().left(px(13.)).top(px(41.)).size(px(9.)).rounded_full().bg(t.accent)))
-            .child(div().absolute().left(px(10.)).top(px(13.)).child(checkbox(("chk", id as u64), t, checked).on_click(cx.listener(move |a, _, _, cx| {
-                cx.stop_propagation();
-                if !a.checked.remove(&id) {
-                    a.checked.insert(id);
-                }
-                cx.notify();
-            }))))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .font_family(MONO)
-                            .text_size(px(12.))
-                            .text_color(if m.seen { t.muted } else { t.ink })
-                            .font_weight(if m.seen { FontWeight::NORMAL } else { FontWeight::BOLD })
-                            .child(from),
-                    )
-                    .child(div().flex_none().text_size(px(11.)).text_color(t.muted).child(fmt_short(m.date))),
-            )
-            .child(
-                div()
-                    .mt(px(3.))
-                    .pr(px(26.))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .font_family(SERIF)
-                    .text_size(px(15.))
-                    .font_weight(if m.seen { FontWeight::NORMAL } else { FontWeight::BOLD })
-                    .text_color(if !m.seen {
-                        t.ink
-                    } else if selected {
-                        t.ink_2
-                    } else {
-                        t.muted
-                    })
-                    .child(if m.subject.is_empty() { "(无主题)".to_string() } else { m.subject.clone() }),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(5.))
-                    .mt(px(4.))
-                    .when(unified, |d| {
-                        d.child(
-                            div()
-                                .flex()
-                                .flex_none()
-                                .items_center()
-                                .gap(px(4.))
-                                .text_size(px(10.5))
-                                .text_color(t.muted)
-                                .child(dot(t.named(&m.account_color), 6.))
-                                .child(div().max_w(px(110.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(m.folder_name.clone())),
-                        )
-                    })
-                    .when(m.answered, |d| d.child(badge(t, "已回复", false)))
-                    .when(m.has_att, |d| d.child(badge(t, "附件", true)))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_size(px(12.))
-                            .text_color(t.muted)
-                            .child(one_line(&m.snippet, 140)),
-                    ),
-            )
-            .child(
-                div()
-                    .id(("star", id as u64))
-                    .absolute()
-                    .right(px(12.))
-                    .top(px(34.))
-                    .size(px(22.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(5.))
-                    .hover(|s| s.bg(t.border_soft))
-                    .child(icon(if flagged { "star-fill" } else { "star" }, 14., if flagged { t.gold } else { t.faint }))
-                    .on_click(cx.listener(move |a, _, _, cx| {
-                        cx.stop_propagation();
-                        a.set_flagged(vec![id], !flagged, true, cx)
-                    })),
-            )
-            .on_click(cx.listener(move |a, _, window, cx| {
-                window.focus(&a.focus);
-                a.reader_collapsed = false;
-                a.open_message(id, cx)
-            }))
-    }
-
-    fn render_reader(&mut self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let pane = div().flex().flex_col().flex_1().min_w_0().h_full().bg(t.bg);
-        let d = match (&self.detail_state, self.detail.clone()) {
-            (DetailState::Ready, Some(d)) => d,
-            (state, _) => {
-                webview::hide();
-                let bar = div().flex().flex_none().justify_end().px(px(14.)).py(px(10.)).child(
-                    button("toggle-reader", t, Kind::Ghost, Some("panel-right"), "", true).on_click(cx.listener(|a, _, _, cx| {
-                        a.reader_collapsed = true;
-                        cx.notify();
-                    })),
-                );
-                return pane.child(bar).child(self.render_empty(t, state.clone(), cx)).into_any_element();
-            }
-        };
-        let id = d.id;
-        let local = d.account_local;
-        let junk = d.folder_role == "junk";
-        let has_archive = !local && d.folder_role != "archive" && self.has_role(d.account_id, "archive");
-        let files: Vec<_> = d.attachments.iter().filter(|a| !a.inline).cloned().collect();
-        let show_html = !d.html.is_empty() && !self.text_mode;
-        let remote = self.remote_ok.contains(&id);
-        let has_remote = match self.remote_cache {
-            Some((cid, len, v)) if cid == id && len == d.html.len() => v,
-            _ => {
-                let v = webview::has_remote_content(&d.html);
-                self.remote_cache = Some((id, d.html.len(), v));
-                v
-            }
-        };
-        let blocked = show_html && !remote && has_remote;
-        let purge = d.folder_role == "trash" || local;
-
-        // 文档缓存：换信 / 换模式 / 放行图片 / 换主题才重建
-        let key = {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            (id, show_html, remote, t.id, d.html.len(), d.text.len()).hash(&mut h);
-            h.finish()
-        };
-        if self.doc.as_ref().map(|x| x.0) != Some(key) {
-            let doc = if show_html {
-                webview::mail_document(&d.html, remote)
-            } else {
-                webview::text_document(&d.text, &hex_css(t.hex_ink), &hex_css(t.hex_paper), &hex_css(t.hex_muted), &hex_css(t.hex_accent))
-            };
-            self.doc = Some((key, doc.into()));
-        }
-        let doc = self.doc.as_ref().map(|x| x.1.clone()).unwrap_or_else(|| Arc::from(""));
-        let frozen_snap = self.snap.clone().filter(|_| self.overlay_open());
-
-        let toolbar = div()
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap(px(6.))
-            .px(px(22.))
-            .h(px(52.))
-            .border_b_1()
-            .border_color(t.border_soft)
-            .child(button("t-reply", t, Kind::Secondary, Some("reply"), "回复", true).on_click(cx.listener(|a, _, w, cx| a.reply("reply", w, cx))))
-            .child(button("t-replyall", t, Kind::Secondary, Some("replyAll"), "全部回复", true).on_click(cx.listener(|a, _, w, cx| a.reply("replyAll", w, cx))))
-            .child(button("t-forward", t, Kind::Secondary, Some("forward"), "转发", true).on_click(cx.listener(|a, _, w, cx| a.reply("forward", w, cx))))
-            .child(div().w(px(6.)))
-            .child(
-                button("t-star", t, Kind::Secondary, Some(if d.flagged { "star-fill" } else { "star" }), "", true)
-                    .text_color(if d.flagged { t.gold } else { t.ink_2 })
-                    .on_click(cx.listener(move |a, _, _, cx| {
-                        let f = a.detail.as_ref().is_some_and(|d| d.flagged);
-                        a.set_flagged(vec![id], !f, false, cx)
-                    })),
-            )
-            .child(button("t-seen", t, Kind::Secondary, Some(if d.seen { "unread" } else { "read" }), "", true).on_click(cx.listener(move |a, _, _, cx| {
-                let s = a.detail.as_ref().is_some_and(|d| d.seen);
-                a.set_seen(vec![id], !s, cx)
-            })))
-            .child(
-                button("t-move", t, Kind::Secondary, Some("move"), "", true)
-                    .on_click(cx.listener(move |a, ev: &ClickEvent, _, cx| a.toggle_pop(Pop::Move(vec![id]), ev.position(), cx))),
-            )
-            .when(has_archive, |x| {
-                x.child(
-                    button("t-archive", t, Kind::Secondary, Some("archive"), "", true)
-                        .on_click(cx.listener(move |a, _, _, cx| a.to_role(vec![id], "archive", "已归档", cx))),
-                )
-            })
-            .when(!local, |x| {
-                x.child(button("t-spam", t, Kind::Secondary, Some(if junk { "inbox" } else { "spam" }), "", true).on_click(cx.listener(move |a, _, _, cx| {
-                    if junk {
-                        a.to_role(vec![id], "inbox", "已移回收件箱", cx)
-                    } else {
-                        a.to_role(vec![id], "junk", "已标为垃圾邮件", cx)
-                    }
-                })))
-            })
-            .child({
-                let subj = d.subject.clone();
-                button("t-eml", t, Kind::Secondary, Some("download"), "", true).on_click(cx.listener(move |a, _, _, cx| a.save_eml(id, &subj, cx)))
-            })
-            .child(div().flex_1())
-            .child(button("toggle-reader", t, Kind::Ghost, Some("panel-right"), "", true).on_click(cx.listener(|a, _, _, cx| {
-                a.reader_collapsed = true;
-                cx.notify();
-            })))
-            .child(
-                button("t-delete", t, Kind::Danger, Some("trash"), if purge { "彻底删除" } else { "删除" }, true)
-                    .on_click(cx.listener(move |a, _, w, cx| a.delete(vec![id], w, cx))),
-            );
-
-        let meta_row = |k: &'static str, v: AnyElement| {
-            div().flex().gap(px(8.)).child(div().w(px(52.)).flex_none().text_color(t.muted).child(k)).child(div().flex_1().min_w_0().child(v))
-        };
-        let mono = |s: String| div().font_family(MONO).text_size(px(11.5)).child(s).into_any_element();
-        let header = div()
-            .flex_none()
-            .px(px(36.))
-            .pt(px(24.))
-            .child(
-                div()
-                    .font_family(SERIF)
-                    .text_size(px(24.))
-                    .font_weight(FontWeight::BOLD)
-                    .line_height(px(32.))
-                    .text_color(t.ink)
-                    .child(if d.subject.is_empty() { "(无主题)".to_string() } else { d.subject.clone() }),
-            )
-            .child(
-                div()
-                    .mt(px(12.))
-                    .text_size(px(12.5))
-                    .line_height(px(23.))
-                    .text_color(t.ink_2)
-                    .child(meta_row(
-                        "发件人",
-                        div().flex().gap(px(6.)).child(d.from.name.clone()).child(mono(format!("<{}>", d.from.address))).into_any_element(),
-                    ))
-                    .child(meta_row("收件人", mono(if d.to.is_empty() { "—".into() } else { addrs_text(&d.to) })))
-                    .when(!d.cc.is_empty(), |x| x.child(meta_row("抄送", mono(addrs_text(&d.cc)))))
-                    .when(!d.reply_to.is_empty() && d.reply_to != d.from.address, |x| x.child(meta_row("回复至", mono(d.reply_to.clone()))))
-                    .child(meta_row("时间", div().child(fmt_full(d.date)).into_any_element()))
-                    .child(meta_row(
-                        "位置",
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .child(dot(t.named(&d.account_color), 7.))
-                            .child(format!("{} / {}", if local { "本地归档".to_string() } else { d.account_email.clone() }, d.folder_label))
-                            .into_any_element(),
-                    )),
-            )
-            .child(div().h(px(1.)).bg(t.border_soft).mt(px(14.)))
-            .when(!d.html.is_empty(), |x| {
-                x.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .mt(px(10.))
-                        .px(px(12.))
-                        .h(px(36.))
-                        .rounded(px(8.))
-                        .when(blocked, |x| x.bg(t.panel_2))
-                        .text_size(px(12.))
-                        .text_color(t.ink_2)
-                        .when(blocked, |x| x.child(icon("image", 13., t.muted)).child("为保护隐私，已阻止加载远程图片与追踪像素。"))
-                        .child(div().flex_1())
-                        .when(blocked, |x| {
-                            x.child(button("show-images", t, Kind::Secondary, None, "显示图片", true).on_click(cx.listener(move |a, _, _, cx| {
-                                a.remote_ok.insert(id);
-                                cx.notify();
-                            })))
-                        })
-                        .child(button("toggle-mode", t, Kind::Ghost, None, if self.text_mode { "原始排版" } else { "纯文本" }, true).on_click(cx.listener(
-                            |a, _, _, cx| {
-                                a.text_mode = !a.text_mode;
-                                cx.notify();
-                            },
-                        ))),
-                )
-            });
-
-        let body = div()
-            .id("mail-body")
-            .flex_1()
-            .min_h(px(120.))
-            .mx(px(if show_html { 24. } else { 32. }))
-            .mt(px(10.))
-            .relative()
-            .rounded(px(6.))
-            .overflow_hidden()
-            .child(
-                canvas(
-                    |b, _, _| b,
-                    move |b, _, window, _| {
-                        webview::show(window, b, key, &doc);
-                    },
-                )
-                .size_full(),
-            )
-            .when_some(frozen_snap, |x, s| x.child(img(s).absolute().top_0().left_0().size_full()));
-
-        let mut footer = div().flex_none().px(px(36.)).pb(px(16.)).pt(px(10.)).flex().flex_col().gap(px(10.));
-        if !files.is_empty() {
-            let mut row = div().flex().flex_wrap().gap(px(8.));
-            for a in files.iter() {
-                let (ix, name, size) = (a.index, a.filename.clone(), a.size);
-                row = row.child(
-                    button(SharedString::from(format!("att-{ix}")), t, Kind::Secondary, Some("clip"), one_line(&a.filename, 36), true)
-                        .child(div().text_size(px(10.5)).text_color(t.muted).child(fmt_size(a.size)))
-                        .on_click(cx.listener(move |app, _, _, cx| app.open_preview(id, ix, name.clone(), size, cx))),
-                );
-            }
-            footer = footer.child(div().text_size(px(11.)).text_color(t.muted).child(format!("附  件 · {}", files.len()))).child(row);
-        }
-        if d.thread.len() > 1 {
-            let mut list = div().id("thread").flex().flex_col().max_h(px(130.)).overflow_y_scroll();
-            for th in d.thread.iter() {
-                let tid = th.id;
-                let cur = tid == id;
-                list = list.child(
-                    div()
-                        .id(("th", tid as u64))
-                        .flex()
-                        .items_center()
-                        .gap(px(10.))
-                        .h(px(28.))
-                        .px(px(8.))
-                        .rounded(px(6.))
-                        .text_size(px(12.5))
-                        .cursor_pointer()
-                        .when(cur, |x| x.bg(t.accent_soft))
-                        .hover(|s| s.bg(t.row_hover))
-                        .child(icon("mail", 13., t.muted))
-                        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(format!(
-                            "{} · {}",
-                            th.from.short(),
-                            th.subject
-                        )))
-                        .child(div().text_size(px(11.)).text_color(t.muted).child(format!("{} · {}", th.folder, fmt_full(th.date))))
-                        .on_click(cx.listener(move |a, _, _, cx| {
-                            if !cur {
-                                a.open_message(tid, cx)
-                            }
-                        })),
-                );
-            }
-            footer = footer.child(div().text_size(px(11.)).text_color(t.muted).child(format!("同一会话 · {} 封", d.thread.len()))).child(list);
-        }
-
-        let card = div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .max_w(px(880.))
-            .mx_auto()
-            .my(px(18.))
-            .bg(t.paper)
-            .border_1()
-            .border_color(t.border)
-            .rounded(px(12.))
-            .overflow_hidden()
-            .child(header)
-            .child(body)
-            .child(footer);
-
-        pane.child(toolbar).child(div().flex().flex_1().min_h_0().px(px(22.)).child(card)).into_any_element()
-    }
-
-    fn render_empty(&mut self, t: &Theme, state: DetailState, cx: &mut Context<Self>) -> impl IntoElement {
-        let has_accounts = self.accounts.iter().any(|a| !a.is_local());
-        let base = div().flex().flex_col().flex_1().items_center().justify_center().px(px(40.)).text_color(t.ink);
-        let envelope = || div().mb(px(22.)).child(icon("envelope", 54., t.line_2).with_transformation(Transformation::rotate(radians(-0.12))));
-        match state {
-            DetailState::Loading => base.child(envelope()).child(div().text_size(px(13.)).text_color(t.ink_2).child("正在取回这封信…")),
-            DetailState::Error(e) => base.child(envelope()).child(div().text_size(px(13.)).text_color(t.danger).max_w(px(460.)).child(e)),
-            _ if has_accounts || self.stats.archived > 0 => base
-                .child(envelope())
-                .child(div().font_family(SERIF).text_size(px(11.)).text_color(t.muted).mb(px(18.)).child("A  L E T T E R  F R O M  T H E  P A S T"))
-                .child(div().font_family(SERIF).text_size(px(32.)).font_weight(FontWeight::BOLD).mb(px(22.)).child("把时间，慢慢读回来。"))
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(t.ink_2)
-                        .line_height(px(25.))
-                        .text_center()
-                        .child("选择一封邮件，开始阅读。")
-                        .child("所有邮件都会增量存档到本机，断网也能读、能搜。"),
-                )
-                .child(div().w_full().max_w(px(540.)).h(px(1.)).bg(t.border).mt(px(38.)).mb(px(28.)))
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(64.))
-                        .child(stat(t, fmt_num(self.stats.archived), "封已存档"))
-                        .child(stat(t, self.accounts.iter().filter(|a| !a.is_local()).count().to_string(), "个账号"))
-                        .child(stat(t, fmt_num(self.stats.unread), "封未读")),
-                ),
-            _ => base
-                .child(div().mb(px(22.)).child(logo(72.)))
-                .child(div().font_family(SERIF).text_size(px(11.)).text_color(t.muted).mb(px(18.)).child("E A S Y M A I L  ·  迷 你 邮 件"))
-                .child(div().font_family(SERIF).text_size(px(32.)).font_weight(FontWeight::BOLD).mb(px(22.)).child("先接入一个邮箱。"))
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(t.ink_2)
-                        .line_height(px(25.))
-                        .text_center()
-                        .child("支持 Gmail（应用专用密码 + 代理）、网易 163、QQ 邮箱（授权码）与 AgentMail。")
-                        .child("凭据 AES-256-GCM 加密保存在本机。"),
-                )
-                .child(
-                    button("empty-add", t, Kind::Primary, Some("plus"), "添加邮箱账号", false)
-                        .mt(px(26.))
-                        .on_click(cx.listener(|a, _, w, cx| a.open_accounts(Tab::Accounts, true, w, cx))),
-                ),
-        }
-    }
-
-    fn render_pop(&mut self, t: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (pop, at) = self.pop.clone()?;
-        let mut p = popover(t, 230.).id("popover").occlude().max_h(px(f32::from(window.viewport_size().height) * 0.75)).overflow_y_scroll();
-        match pop {
-            Pop::Theme => {
-                let cur = theme(cx).id;
-                let auto = self.pref.pref == "auto";
-                p = p.w(px(250.)).child(menu_title(t, format!("配色主题 · {} 套", palettes::PALETTES.len())));
-                p = p.child(menu_row("th-auto", t, None, "跟随系统 · Auto", auto).on_click(cx.listener(|a, _, w, cx| {
-                    let mut p = a.pref.clone();
-                    p.pref = "auto".into();
-                    a.set_theme_pref(p, w, cx);
-                })));
-                if auto {
-                    for (dark, label) in [(false, "浅色时"), (true, "深色时")] {
-                        let mut row = div()
-                            .flex()
-                            .flex_wrap()
-                            .gap(px(4.))
-                            .px(px(9.))
-                            .py(px(4.))
-                            .child(div().w(px(42.)).text_size(px(11.)).text_color(t.muted).child(label));
-                        for pal in palettes::PALETTES.iter().filter(|p| p.dark == dark) {
-                            let sel = if dark { self.pref.dark == pal.id } else { self.pref.light == pal.id };
-                            let id = pal.id;
-                            row = row.child(
-                                div()
-                                    .id(SharedString::from(format!("slot-{id}")))
-                                    .size(px(20.))
-                                    .rounded(px(5.))
-                                    .bg(rgb(pal.paper))
-                                    .border_2()
-                                    .border_color(if sel { t.accent } else { t.border })
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .cursor_pointer()
-                                    .child(div().size(px(9.)).rounded(px(2.5)).bg(rgb(pal.accent)))
-                                    .on_click(cx.listener(move |a, _, w, cx| {
-                                        let mut p = a.pref.clone();
-                                        if dark {
-                                            p.dark = id.into();
-                                        } else {
-                                            p.light = id.into();
-                                        }
-                                        a.set_theme_pref(p, w, cx);
-                                    })),
-                            );
-                        }
-                        p = p.child(row);
-                    }
-                }
-                for (dark, sec) in [(false, "浅色"), (true, "深色")] {
-                    p = p.child(menu_title(t, sec));
-                    for pal in palettes::PALETTES.iter().filter(|p| p.dark == dark) {
-                        let id = pal.id;
-                        let on = !auto && cur == id;
-                        p = p.child(
-                            menu_row(SharedString::from(format!("th-{id}")), t, None, pal.name, on)
-                                .child(
-                                    div()
-                                        .size(px(17.))
-                                        .rounded(px(5.))
-                                        .bg(rgb(pal.paper))
-                                        .border_1()
-                                        .border_color(t.border)
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .child(div().size(px(9.)).rounded(px(3.)).bg(rgb(pal.accent))),
-                                )
-                                .on_click(cx.listener(move |a, _, w, cx| {
-                                    let mut p = a.pref.clone();
-                                    p.pref = id.into();
-                                    a.set_theme_pref(p, w, cx);
-                                    a.pop = None;
-                                })),
-                        );
-                    }
-                }
-            }
-            Pop::Export => {
-                let n = self.checked.len();
-                p = p.w(px(250.)).child(menu_title(t, if n > 0 { format!("导出选中的 {n} 封") } else { format!("导出当前列表 {} 封", fmt_num(self.total)) }));
-                p = p
-                    .child(
-                        menu_row("ex-mbox", t, Some("archive"), "mbox（Thunderbird / Apple Mail）", false)
-                            .on_click(cx.listener(|a, _, _, cx| a.export(transfer::ExportKind::Mbox, cx))),
-                    )
-                    .child(
-                        menu_row("ex-csv", t, Some("draft"), "CSV 表格（Excel 可直接打开）", false)
-                            .on_click(cx.listener(|a, _, _, cx| a.export(transfer::ExportKind::Csv, cx))),
-                    )
-                    .child(
-                        menu_row("ex-maildir", t, Some("folder"), "Maildir / .eml 文件夹", false)
-                            .on_click(cx.listener(|a, _, _, cx| a.export(transfer::ExportKind::Maildir, cx))),
-                    );
-            }
-            Pop::Move(ids) => {
-                let acc_ids: HashSet<i64> = self
-                    .items
-                    .iter()
-                    .filter(|m| ids.contains(&m.id))
-                    .map(|m| m.account_id)
-                    .chain(self.detail.iter().filter(|d| ids.contains(&d.id)).map(|d| d.account_id))
-                    .collect();
-                p = p.child(menu_title(t, "移动到…"));
-                if acc_ids.len() > 1 {
-                    p = p.child(div().px(px(9.)).py(px(6.)).text_size(px(12.)).text_color(t.muted).child("选中的邮件来自多个账号，不能一起移动。"));
-                } else if let Some(acc) = acc_ids.iter().next().copied() {
-                    let cur: HashSet<i64> = self
-                        .items
-                        .iter()
-                        .filter(|m| ids.contains(&m.id))
-                        .map(|m| m.folder_id)
-                        .chain(self.detail.iter().filter(|d| ids.contains(&d.id)).map(|d| d.folder_id))
-                        .collect();
-                    for f in self.folders.iter().filter(|f| f.account_id == acc && !(cur.len() == 1 && cur.contains(&f.id))) {
-                        let fid = f.id;
-                        let ids = ids.clone();
-                        p = p.child(
-                            menu_row(SharedString::from(format!("mv-{fid}")), t, Some(role_icon(&f.role)), f.label(), false)
-                                .on_click(cx.listener(move |a, _, _, cx| a.move_to(ids.clone(), fid, cx))),
-                        );
-                    }
-                }
-            }
-            Pop::Folder(fid) => {
-                let f = self.folders.iter().find(|f| f.id == fid)?.clone();
-                let local = self.accounts.iter().any(|a| a.id == f.account_id && a.is_local());
-                p = p.child(menu_title(t, f.label()));
-                let item = |id: &'static str, ic: &'static str, label: String, action: &'static str, cx: &mut Context<Self>| {
-                    menu_row(id, t, Some(ic), label, false).on_click(cx.listener(move |a, _, w, cx| a.folder_action(action, fid, w, cx)))
-                };
-                p = p.child(item("fm-read", "read", "全部标为已读".into(), "read-all", cx));
-                if !local {
-                    p = p.child(item("fm-sync", "refresh", "立即同步此文件夹".into(), "sync", cx)).child(item(
-                        "fm-toggle",
-                        "eye",
-                        if f.sync_enabled { "暂停同步此文件夹".into() } else { "恢复同步此文件夹".into() },
-                        "toggle-sync",
-                        cx,
-                    ));
-                } else {
-                    p = p
-                        .child(menu_sep(t))
-                        .child(item("fm-new", "plus", "新建子文件夹…".into(), "new-sub", cx))
-                        .child(item("fm-rename", "edit", "重命名…".into(), "rename", cx))
-                        .child(item("fm-delete", "trash", "删除文件夹…".into(), "delete", cx).text_color(t.danger));
-                }
-            }
-            Pop::Account(aid) => {
-                let a = self.accounts.iter().find(|a| a.id == aid)?.clone();
-                let local = a.is_local();
-                p = p.child(menu_title(t, if local { "本地归档".to_string() } else { a.email.clone() }));
-                if !local {
-                    p = p
-                        .child(menu_row("am-sync", t, Some("refresh"), "立即同步", false).on_click(cx.listener(move |app, _, _, cx| {
-                            app.pop = None;
-                            app.eng.request_sync(aid, None, true);
-                            app.toast("已开始同步", false, cx);
-                        })))
-                        .child(
-                            menu_row("am-edit", t, Some("gear"), "账号设置…", false)
-                                .on_click(cx.listener(|app, _, w, cx| app.open_accounts(Tab::Accounts, false, w, cx))),
-                        );
-                } else {
-                    p = p
-                        .child(menu_row("am-new", t, Some("plus"), "新建文件夹…", false).on_click(cx.listener(move |app, _, w, cx| {
-                            app.open_prompt("在本地归档新建文件夹".into(), "", PromptAction::NewFolder { account_id: aid, parent: None }, w, cx)
-                        })))
-                        .child(menu_row("am-import", t, Some("download"), "导入邮件…", false).on_click(cx.listener(|app, _, w, cx| app.open_import(w, cx))));
-                }
-            }
-        }
-        let p = p.on_mouse_down_out(cx.listener(|a, _, _, cx| {
-            a.pop = None;
-            a.pop_closed_at = Instant::now();
-            cx.notify();
-        }));
-        Some(deferred(anchored().position(at).snap_to_window_with_margin(px(8.)).child(p)).with_priority(1).into_any_element())
-    }
-
-    fn render_modal(&mut self, t: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let Some(modal) = self.modal.as_ref() else {
-            webview::hide_quicklook();
-            crate::editor::hide();
-            return None;
-        };
-        if !matches!(modal, Modal::Composer(_)) {
-            crate::editor::hide();
-        }
-        // 附件预览（弹窗，或写信窗口里的原地预览）之外不保留原生预览视图
-        let composer_preview = matches!(modal, Modal::Composer(c) if c.read(cx).has_preview());
-        if !matches!(modal, Modal::Preview { .. }) && !composer_preview {
-            webview::hide_quicklook();
-        }
-        let (inner, overlay_close): (AnyElement, bool) = match modal {
-            Modal::Preview { msg_id, index, filename, size, path } => {
-                let vp = window.viewport_size();
-                let w = (f32::from(vp.width) * 0.8).clamp(480., 1100.);
-                let body_h = (f32::from(vp.height) * 0.9 - 130.).max(240.);
-                let (mid, ix, name, p) = (*msg_id, *index, filename.clone(), path.clone());
-                (
-                    modal_shell(
-                        t,
-                        w,
-                        one_line(filename, 60),
-                        fmt_size(*size),
-                        button("preview-x", t, Kind::Ghost, Some("close"), "", true).on_click(cx.listener(|a, _, w, cx| {
-                            a.modal = None;
-                            webview::hide_quicklook();
-                            w.focus(&a.focus);
-                            cx.notify();
-                        })),
-                    )
-                    .child(
-                        div().h(px(body_h)).w_full().bg(t.panel_2).child(
-                            canvas(
-                                |b, _, _| b,
-                                move |b, _, window, _| {
-                                    // 原生视图不受 GPUI 裁剪：自己与弹窗的可见区域（max_w / max_h / overflow_hidden 之后）取交集
-                                    let vis = b.intersect(&window.content_mask().bounds);
-                                    webview::show_quicklook(window, vis, &p)
-                                },
-                            )
-                            .size_full(),
-                        ),
-                    )
-                    .child(
-                        modal_footer(t).child(div().flex_1()).child(
-                            button("preview-save", t, Kind::Primary, Some("download"), "另存为…", false)
-                                .on_click(cx.listener(move |a, _, _, cx| a.save_attachment(mid, ix, name.clone(), cx))),
-                        ),
-                    )
-                    .into_any_element(),
-                    true,
-                )
-            }
-            Modal::Composer(c) => (c.clone().into_any_element(), false),
-            Modal::Accounts(m) => (m.clone().into_any_element(), true),
-            Modal::Import(m) => (m.clone().into_any_element(), !m.read(cx).busy()),
-            Modal::Prompt { title, input, .. } => {
-                let focused = input.read(cx).is_focused(window);
-                (
-                    modal_shell(
-                        t,
-                        420.,
-                        title.clone(),
-                        "",
-                        button("prompt-x", t, Kind::Ghost, Some("close"), "", true).on_click(cx.listener(|a, _, w, cx| {
-                            a.modal = None;
-                            w.focus(&a.focus);
-                            cx.notify();
-                        })),
-                    )
-                    .child(div().p(px(22.)).child(field_box(t, focused).child(div().flex_1().child(input.clone()))))
-                    .child(
-                        modal_footer(t)
-                            .child(div().flex_1())
-                            .child(button("prompt-cancel", t, Kind::Ghost, None, "取消", false).on_click(cx.listener(|a, _, w, cx| {
-                                a.modal = None;
-                                w.focus(&a.focus);
-                                cx.notify();
-                            })))
-                            .child(button("prompt-ok", t, Kind::Primary, None, "确定", false).on_click(cx.listener(|a, _, w, cx| a.submit_prompt(w, cx)))),
-                    )
-                    .into_any_element(),
-                    true,
-                )
-            }
-        };
-        Some(
-            div()
-                .id("modal-overlay")
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .bg(t.overlay)
-                .occlude()
-                .flex()
-                .items_center()
-                .justify_center()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |a, _, w, cx| {
-                        if overlay_close && a.pop.is_none() {
-                            if matches!(a.modal, Some(Modal::Accounts(_)) | Some(Modal::Import(_))) {
-                                a.load_meta(cx);
-                            }
-                            a.modal = None;
-                            w.focus(&a.focus);
-                            cx.notify();
-                        }
-                    }),
-                )
-                .child(div().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(inner))
-                .into_any_element(),
-        )
-    }
 }
 
 /// 附件预览的临时文件目录（启动时清空）
@@ -2791,17 +1755,42 @@ impl Render for MailApp {
         };
         let toast_w = if on_top { 560. } else { toast_w };
         for tt in &self.toasts {
+            let action = tt.action.clone().map(|a| {
+                let label = match a {
+                    ToastAction::Undo => "撤销 ⌘Z",
+                    ToastAction::Unsend(_) => "撤回",
+                    ToastAction::Open(_) => "查看",
+                    ToastAction::Copy(_) => "复制",
+                };
+                div()
+                    .id(("toast-act", tt.id as usize))
+                    .flex_none()
+                    .ml(px(14.))
+                    .px(px(9.))
+                    .py(px(2.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(t.toast_fg.opacity(0.4))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.toast_fg.opacity(0.12)))
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, w, cx| this.toast_click(a.clone(), w, cx)))
+            });
             toasts = toasts.child(
                 div()
                     .max_w(px(toast_w))
                     .px(px(16.))
                     .py(px(9.))
                     .rounded(px(9.))
+                    .flex()
+                    .items_center()
                     .bg(if tt.error { t.danger } else { t.toast_bg })
                     .text_color(if tt.error { gpui::white() } else { t.toast_fg })
                     .text_size(px(12.5))
                     .shadow(vec![BoxShadow { color: t.shadow, offset: point(px(0.), px(6.)), blur_radius: px(20.), spread_radius: px(0.) }])
-                    .child(tt.msg.clone()),
+                    .child(div().flex_1().child(tt.msg.clone()))
+                    .children(action),
             );
         }
         let (toasts_below, toasts_above) = if on_top { (None, Some(toasts)) } else { (Some(toasts), None) };
@@ -2833,6 +1822,8 @@ impl Render for MailApp {
             .on_action(cx.listener(|a, _: &OpenSettings, w, cx| a.open_accounts(Tab::Accounts, false, w, cx)))
             .on_action(cx.listener(|a, _: &OpenImport, w, cx| a.open_import(w, cx)))
             .on_action(cx.listener(|a, _: &CycleTheme, w, cx| a.cycle_theme(w, cx)))
+            .on_action(cx.listener(|a, _: &CommandPalette, w, cx| a.open_palette(w, cx)))
+            .on_action(cx.listener(|a, _: &Undo, _, cx| a.undo(cx)))
             .child(header)
             .child(
                 div()
@@ -2887,8 +1878,8 @@ impl Render for MailApp {
                         }
                         cx.notify();
                     }))
-                    .on_mouse_up(MouseButton::Left, cx.listener(|a, _, _, _| a.resizing = None))
-                    .on_mouse_up_out(MouseButton::Left, cx.listener(|a, _, _, _| a.resizing = None))
+                    .on_mouse_up(MouseButton::Left, cx.listener(|a, _, _, _| a.end_resize()))
+                    .on_mouse_up_out(MouseButton::Left, cx.listener(|a, _, _, _| a.end_resize()))
                     .child(sidebar)
                     .child(self.splitter(0, &t, cx))
                     .child(list)

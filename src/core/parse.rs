@@ -9,7 +9,8 @@ use base64::Engine;
 use mail_parser::{Address, HeaderValue, Message, MessageParser, MimeHeaders, PartType};
 
 /// 同步时请求的头部字段
-pub const HEADER_FIELDS: &str = "FROM TO CC REPLY-TO SUBJECT DATE MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE";
+pub const HEADER_FIELDS: &str =
+    "FROM TO CC REPLY-TO SUBJECT DATE MESSAGE-ID IN-REPLY-TO REFERENCES CONTENT-TYPE LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST AUTHENTICATION-RESULTS";
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Envelope {
@@ -24,6 +25,27 @@ pub struct Envelope {
     pub refs: String,
     /// multipart/mixed 等：大概率带附件（正文取回后以真实附件为准）
     pub maybe_att: bool,
+    /// List-Unsubscribe 原文（`<mailto:…>, <https://…>`）
+    pub unsub: String,
+    /// 有 `List-Unsubscribe-Post: List-Unsubscribe=One-Click`（RFC 8058 一键退订）
+    pub unsub_post: bool,
+    /// 收件服务器写的 Authentication-Results（SPF / DKIM / DMARC 结论）
+    pub auth_res: String,
+}
+
+impl Envelope {
+    /// 会话键：References 的第一个（会话的根）→ In-Reply-To → 自己的 Message-ID；都没有返回空串（调用方用 `id:<行号>`）
+    pub fn thread_key(&self) -> String {
+        thread_key(&self.message_id, &self.in_reply_to, &self.refs)
+    }
+}
+
+pub fn thread_key(message_id: &str, in_reply_to: &str, refs: &str) -> String {
+    refs.split_whitespace()
+        .next()
+        .map(String::from)
+        .or_else(|| (!in_reply_to.is_empty()).then(|| in_reply_to.to_string()))
+        .unwrap_or_else(|| message_id.to_string())
 }
 
 pub fn addrs(a: Option<&Address>) -> Vec<Addr> {
@@ -68,7 +90,86 @@ fn envelope_of(m: &Message) -> Envelope {
         in_reply_to: ids(m.in_reply_to()).first().map(|s| angle(s)).unwrap_or_default(),
         refs: ids(m.references()).iter().map(|s| angle(s)).collect::<Vec<_>>().join(" "),
         maybe_att,
+        unsub: raw_header(m, "List-Unsubscribe"),
+        unsub_post: raw_header(m, "List-Unsubscribe-Post").to_ascii_lowercase().contains("one-click"),
+        auth_res: raw_header(m, "Authentication-Results"),
     }
+}
+
+/// 头部原文（折行展开、首尾去空白）
+fn raw_header(m: &Message, name: &str) -> String {
+    m.header_raw(name).map(|s| s.split_whitespace().collect::<Vec<_>>().join(" ")).unwrap_or_default()
+}
+
+/// List-Unsubscribe 里的地址：(https 地址, mailto 地址)
+pub fn unsub_targets(raw: &str) -> (Option<String>, Option<String>) {
+    let mut http = None;
+    let mut mailto = None;
+    for part in raw.split(',') {
+        let u = part.trim().trim_start_matches('<').trim_end_matches('>').trim();
+        if (u.starts_with("https://") || u.starts_with("http://")) && http.is_none() {
+            http = Some(u.to_string());
+        } else if u.to_ascii_lowercase().starts_with("mailto:") && mailto.is_none() {
+            mailto = Some(u.to_string());
+        }
+    }
+    (http, mailto)
+}
+
+/// SPF / DKIM / DMARC 的结论（pass / fail / none …），取不到为空
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AuthVerdict {
+    pub spf: String,
+    pub dkim: String,
+    pub dmarc: String,
+}
+
+impl AuthVerdict {
+    /// 有明确失败
+    pub fn failed(&self) -> bool {
+        [&self.spf, &self.dkim, &self.dmarc].iter().any(|v| matches!(v.as_str(), "fail" | "softfail" | "permerror"))
+    }
+    pub fn is_empty(&self) -> bool {
+        self.spf.is_empty() && self.dkim.is_empty() && self.dmarc.is_empty()
+    }
+}
+
+pub fn auth_verdict(raw: &str) -> AuthVerdict {
+    let get = |key: &str| {
+        let l = raw.to_ascii_lowercase();
+        let pat = format!("{key}=");
+        l.match_indices(&pat)
+            .find(|(i, _)| *i == 0 || !l.as_bytes()[i - 1].is_ascii_alphanumeric())
+            .map(|(i, _)| l[i + pat.len()..].chars().take_while(|c| c.is_ascii_alphanumeric()).collect::<String>())
+            .unwrap_or_default()
+    };
+    AuthVerdict { spf: get("spf"), dkim: get("dkim"), dmarc: get("dmarc") }
+}
+
+/// 正文里引用的远程资源：(主机名列表（去重）, 疑似追踪像素个数)。
+/// 追踪像素：1×1 / 0×0 的图片，或地址里带 open / track / pixel / beacon 这类字眼的图片。
+pub fn remote_trackers(html: &str) -> (Vec<String>, usize) {
+    use std::sync::LazyLock;
+    static IMG: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r#"(?is)<img\b[^>]*>"#).expect("regex"));
+    static SRC: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r#"(?i)\bsrc\s*=\s*["']?(https?://[^"'\s>]+)"#).expect("regex"));
+    static TINY: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r#"(?i)\b(width|height)\s*[=:]\s*["']?\s*[01](px)?\b"#).expect("regex"));
+    static HINT: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"(?i)(/open|track|pixel|beacon|/o\.gif|/wf/open|openrate|/e/o/)").expect("regex"));
+    let mut hosts: Vec<String> = Vec::new();
+    let mut pixels = 0;
+    for tag in IMG.find_iter(html) {
+        let tag = tag.as_str();
+        let Some(src) = SRC.captures(tag).map(|c| c[1].to_string()) else { continue };
+        if let Some(h) = url::Url::parse(&src).ok().and_then(|u| u.host_str().map(|h| h.to_lowercase())) {
+            if !hosts.contains(&h) {
+                hosts.push(h);
+            }
+        }
+        if TINY.is_match(tag) || HINT.is_match(&src) {
+            pixels += 1;
+        }
+    }
+    (hosts, pixels)
 }
 
 /// 解析 `HEADER.FIELDS` 拿到的头部字节。
@@ -180,12 +281,30 @@ fn inline_cids(html: &str, m: &Message) -> String {
     for p in m.attachments() {
         let Some(cid) = p.content_id() else { continue };
         let cid = cid.trim_matches(|c| c == '<' || c == '>');
+        if cid.is_empty() {
+            continue;
+        }
         let needle = format!("cid:{cid}");
         if out.contains(&needle) {
             let data = format!("data:{};base64,{}", part_mime(p), base64::engine::general_purpose::STANDARD.encode(p.contents()));
-            out = out.replace(&needle, &data);
+            out = replace_cid(&out, &needle, &data);
         }
     }
+    out
+}
+
+/// 只替换完整的 `cid:xxx` 引用：后面紧跟引号、括号、空白或结尾才算，`cid:logo1` 不会误伤 `cid:logo10`
+fn replace_cid(html: &str, needle: &str, data: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(i) = rest.find(needle) {
+        let after = &rest[i + needle.len()..];
+        let boundary = after.chars().next().is_none_or(|c| matches!(c, '"' | '\'' | ')' | '>' | ';' | '&') || c.is_whitespace());
+        out.push_str(&rest[..i]);
+        out.push_str(if boundary { data } else { needle });
+        rest = after;
+    }
+    out.push_str(rest);
     out
 }
 
@@ -240,6 +359,68 @@ pub fn people_text(from: &Addr, to: &[Addr], cc: &[Addr]) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// 稳定版工具链上的「穷人版 fuzz」：对一封真实结构的邮件做几千次随机字节变异，
+    /// 所有解析入口都不能 panic。完整的覆盖率引导 fuzz 见 fuzz/（cargo +nightly fuzz run parse_message）。
+    #[test]
+    fn mutated_messages_never_panic() {
+        let seed = concat!(
+            "From: =?UTF-8?B?5byg5LiJ?= <a@b.com>\r\nTo: x@y.com\r\nSubject: =?GB2312?B?suLK1A==?=\r\n",
+            "List-Unsubscribe: <https://u.example/x>, <mailto:u@example.com?subject=unsub>\r\nList-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n",
+            "Authentication-Results: mx; spf=fail; dkim=pass; dmarc=fail\r\nMessage-ID: <m1@b.com>\r\nReferences: <r0@b.com> <r1@b.com>\r\n",
+            "MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=\"B\"\r\n\r\n--B\r\nContent-Type: text/html; charset=utf-8\r\n\r\n",
+            "<p>验证码 123456</p><img src=\"cid:i1\"><img width=1 height=1 src=\"https://t.example/p.gif\"><a href=\"https://evil.example\">https://bank.com</a>\r\n",
+            "--B\r\nContent-Type: image/png\r\nContent-ID: <i1>\r\nContent-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n--B--\r\n"
+        )
+        .as_bytes()
+        .to_vec();
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut rnd = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let specials = [b'<', b'>', b'"', b'=', b'?', b'\r', b'\n', b':', b';', b'-', 0xE4, 0xFF, 0];
+        for _ in 0..3000 {
+            let mut m = seed.clone();
+            for _ in 0..(rnd() % 8 + 1) {
+                let i = (rnd() as usize) % m.len().max(1);
+                match rnd() % 4 {
+                    0 => m[i] = specials[(rnd() as usize) % specials.len()],
+                    1 => m.truncate(i),
+                    2 => {
+                        let b = m[i];
+                        m.insert(i, b)
+                    }
+                    _ => {
+                        if i < m.len() {
+                            m.remove(i);
+                        }
+                    }
+                }
+                if m.is_empty() {
+                    break;
+                }
+            }
+            let env = super::parse_headers(&m);
+            let _ = env.thread_key();
+            if let Some(p) = super::parse_full(&m) {
+                let _ = super::inline_cids_from_raw(&p.html, &m);
+                let _ = super::remote_trackers(&p.html);
+                let _ = crate::core::extract::phishing_links(&p.html);
+                let _ = crate::core::extract::trips(&p.html, &p.text);
+                let _ = crate::core::extract::verification_code(&p.env.subject, &p.text);
+            }
+            let _ = super::file_attachments(&m);
+            let s = String::from_utf8_lossy(&m);
+            let _ = super::unsub_targets(&s);
+            let _ = super::auth_verdict(&s);
+            let _ = super::html_to_text(&s);
+            let _ = crate::core::queries::parse_query(&s);
+            let _ = crate::core::extract::strip_tracking(&s);
+        }
+    }
+
     #[test]
     fn tidy_text_shortens_rules() {
         let long = "─".repeat(5000);
@@ -320,6 +501,29 @@ JVBERi0xLjQ=\r\n\
         assert_eq!((n.as_str(), t.as_str()), ("发票.pdf", "application/pdf"));
         assert!(data.starts_with(b"%PDF"));
         assert_eq!(file_attachments(SAMPLE.as_bytes()).len(), 1);
+    }
+
+    #[test]
+    fn cid_replacement_is_exact() {
+        assert_eq!(replace_cid(r#"<img src="cid:a1"><img src="cid:a10">"#, "cid:a1", "X"), r#"<img src="X"><img src="cid:a10">"#);
+        assert_eq!(replace_cid("url(cid:a1)", "cid:a1", "X"), "url(X)");
+    }
+
+    #[test]
+    fn extras_unsub_auth_trackers_thread() {
+        let raw = b"From: n@shop.com\r\nSubject: sale\r\nMessage-ID: <m@x>\r\nReferences: <root@x> <p@x>\r\nList-Unsubscribe: <mailto:u@shop.com?subject=unsub>, <https://shop.com/u?id=1>\r\nList-Unsubscribe-Post: List-Unsubscribe=One-Click\r\nAuthentication-Results: mx.163.com; spf=pass smtp.mailfrom=shop.com; dkim=fail header.d=shop.com; dmarc=pass\r\nContent-Type: text/html\r\n\r\n<p>hi</p><img src=\"https://t.shop.com/open?id=1\" width=\"1\" height=\"1\"><img src='https://cdn.shop.com/a.png'>\r\n";
+        let p = parse_full(raw).unwrap();
+        assert!(p.env.unsub_post);
+        assert_eq!(unsub_targets(&p.env.unsub), (Some("https://shop.com/u?id=1".into()), Some("mailto:u@shop.com?subject=unsub".into())));
+        let v = auth_verdict(&p.env.auth_res);
+        assert_eq!((v.spf.as_str(), v.dkim.as_str(), v.dmarc.as_str()), ("pass", "fail", "pass"));
+        assert!(v.failed());
+        let (hosts, pixels) = remote_trackers(&p.html);
+        assert_eq!(hosts, vec!["t.shop.com", "cdn.shop.com"]);
+        assert_eq!(pixels, 1);
+        assert_eq!(p.env.thread_key(), "<root@x>");
+        assert_eq!(thread_key("<a@x>", "", ""), "<a@x>");
+        assert_eq!(thread_key("<a@x>", "<p@x>", ""), "<p@x>");
     }
 
     #[test]

@@ -11,3 +11,9 @@
 *.log
 .wrangler/
 .dev.vars
+/todo
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/coverage
+/fuzz/Cargo.lock

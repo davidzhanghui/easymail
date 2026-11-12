@@ -3,7 +3,7 @@
 use easymail::core::config::{default_data_dir, APP_NAME, BUNDLE_ID};
 use easymail::core::db::Store;
 use easymail::core::engine::Engine;
-use easymail::core::{accounts, mailer, migrate};
+use easymail::core::{accounts, mailer};
 use easymail::ui::{self, app::MailApp, macos};
 use gpui::*;
 use std::path::Path;
@@ -66,24 +66,6 @@ fn main() {
         eprintln!("{APP_NAME} 已在运行，已切换到已有窗口");
         return;
     }
-    // 迁移失败时不要悄悄以空库启动：空库一旦建出来，下次就不会再尝试迁移了
-    loop {
-        match migrate::migrate_if_needed(&dir, &migrate::candidates()) {
-            Ok(Some(src)) => log::info!("已从 {} 迁移 just-mail 的存档", src.display()),
-            Ok(None) => {}
-            Err(e) => {
-                log::error!("迁移旧存档失败：{e:#}");
-                match alert("迁移旧存档失败", &format!("{e:#}\n\n可以重试；或者先以空库启动（之后不会再自动迁移）。"), &["退出", "以空库启动", "重试"])
-                    .as_deref()
-                {
-                    Some("重试") => continue,
-                    Some("以空库启动") | None => {}
-                    _ => std::process::exit(1),
-                }
-            }
-        }
-        break;
-    }
     let store = match Store::open(&dir) {
         Ok(s) => s,
         Err(e) => {
@@ -97,6 +79,10 @@ fn main() {
         }
     };
     let _ = accounts::ensure_local(&store);
+    // 首次启动探测本机代理（v2ray / Clash / Surge 常见端口），探测到就写进设置
+    if std::env::var_os("EASYMAIL_SCRIPT").is_none() {
+        easymail::core::tools::init_proxy(&store);
+    }
     {
         let s = store.clone();
         std::thread::spawn(move || {
@@ -130,6 +116,7 @@ fn main() {
     app.run(move |cx: &mut App| {
         ui::bind_keys(cx);
         ui::composer::bind_keys(cx);
+        macos::init_notifications();
         cx.set_menus(ui::menus());
         cx.on_action(|_: &ui::Quit, cx: &mut App| cx.quit());
         cx.on_action(|_: &ui::HideWindow, cx: &mut App| cx.hide());
@@ -159,6 +146,13 @@ fn main() {
                 },
             )
             .expect("open window");
+        window
+            .update(cx, |app, _, cx| {
+                if !testing {
+                    app.startup_checks(cx);
+                }
+            })
+            .ok();
         window
             .update(cx, |_, window, cx| {
                 // 关窗口 = 隐藏到菜单栏，后台继续收信；退出走菜单 / 托盘 / ⌘Q

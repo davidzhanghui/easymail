@@ -1,5 +1,5 @@
 //! 凭据加密：AES-256-GCM，主密钥存在 `<数据目录>/master.key`（base64，权限 0600，首次启动生成）。
-//! 密文格式与 just-mail 完全一致：`v1:<iv b64>:<tag b64>:<密文 b64>`，旧数据目录可直接沿用。
+//! 密文格式：`v1:<iv b64>:<tag b64>:<密文 b64>`。
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};

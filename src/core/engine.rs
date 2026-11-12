@@ -7,7 +7,7 @@
 //!   Engine ──Evt──▶ 界面（同步状态、文件夹变化、新邮件、提示）
 //! ```
 //!
-//! 增量同步与 just-mail 相同：
+//! 增量同步：
 //!   ① 文件夹列表 ② UID > last_uid 的新信封（首次只拉最近 N 封） ③ 标记（CONDSTORE 增量）+ 服务器端删除
 //!   ④ 每个文件夹最新 N 封预取正文 ⑤ 空闲时按 500 封一批回填更早的信封
 
@@ -26,7 +26,7 @@ use rusqlite::params;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, watch};
 
 type StopRx = watch::Receiver<bool>;
@@ -103,6 +103,12 @@ pub enum Op {
         flags: String,
         raw: Vec<u8>,
     },
+    /// 草稿同步：存新副本（raw 为空则不存），再按 Message-ID 删掉旧副本
+    ReplaceDraft {
+        path: String,
+        raw: Vec<u8>,
+        old_mid: String,
+    },
 }
 
 impl Op {
@@ -113,6 +119,8 @@ impl Op {
             Op::SaveSent { .. } => true,
             // 响应超时时可能已经存进去了
             Op::Append { .. } => false,
+            // 重复执行最多多一份草稿副本，下次保存时会被替换
+            Op::ReplaceDraft { .. } => true,
         }
     }
 }
@@ -129,6 +137,11 @@ enum Job {
     Flush {
         ids: Vec<i64>,
         reply: oneshot::Sender<HashMap<i64, Outcome>>,
+    },
+    /// 撤销还没送达服务器的待办：删掉待办并按 undo 恢复本地，返回撤销成功的条数
+    Undo {
+        ids: Vec<i64>,
+        reply: oneshot::Sender<usize>,
     },
 }
 
@@ -180,7 +193,17 @@ impl Backoff {
     }
 }
 
+/// 最近一次可撤销的操作
+#[derive(Clone, Debug, PartialEq)]
+pub struct LastUndo {
+    pub label: String,
+    /// (账号, 待办 id)
+    pub ops: Vec<(i64, i64)>,
+    pub at: i64,
+}
+
 struct Inner {
+    last_undo: Mutex<Option<LastUndo>>,
     store: Store,
     backoff: Mutex<HashMap<i64, Backoff>>,
     /// 只在 Drop 里取走；其余时候一定是 Some
@@ -218,6 +241,7 @@ impl Engine {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(3).enable_all().thread_name("easymail-sync").build()?;
         Ok(Engine {
             inner: Arc::new(Inner {
+                last_undo: Mutex::new(None),
                 store,
                 backoff: Mutex::new(HashMap::new()),
                 rt: Some(rt),
@@ -322,9 +346,32 @@ impl Engine {
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         });
+        // 发件箱、稍后处理：每 3 秒看一眼（只查一条带索引的 SQL，空闲时几乎零开销）
+        super::outbox::recover(self.store());
+        let me = self.clone();
+        self.spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                super::outbox::tick(&me).await;
+                if super::snooze::wake_due(me.store()).unwrap_or(0) > 0 {
+                    me.emit(Evt::Accounts);
+                }
+            }
+        });
     }
 
     fn scheduler_tick(&self) {
+        // 定时增量导出（设置里开启后）
+        if let Some(dir) = super::archive::auto_export_due(self.store()) {
+            let me = self.clone();
+            self.spawn(async move {
+                match super::archive::run_auto_export(me.clone(), dir).await {
+                    Ok(n) if n > 0 => me.toast(format!("定时导出完成：新增 {n} 封"), false),
+                    Ok(_) => {}
+                    Err(e) => me.toast(format!("定时导出失败：{e:#}"), true),
+                }
+            });
+        }
         let interval = (self.store().settings().sync_interval_min.max(1) as i64) * 60_000;
         for a in accounts::list(self.store()).unwrap_or_default() {
             if a.is_local() || !a.sync_enabled || self.sync_state(a.id).syncing || self.backoff(a.id).blocked(now_ms()) {
@@ -433,6 +480,32 @@ impl Engine {
         }
     }
 
+    /// 撤销还没送达服务器的待办（撤销窗口内），返回撤销成功的条数
+    pub fn undo(&self, id: i64, ids: Vec<i64>) -> impl Future<Output = Result<usize>> + Send + 'static {
+        let (o, _) = self.ensure_account(id, false);
+        let (tx, rx) = oneshot::channel();
+        let sent = o.send(Job::Undo { ids, reply: tx }).is_ok();
+        async move {
+            if !sent {
+                bail!("操作队列已关闭");
+            }
+            rx.await.map_err(|_| anyhow!("操作被中断"))
+        }
+    }
+
+    /// 记下最近一次可撤销的操作（⌘Z / 提示条上的「撤销」用）
+    pub fn set_last_undo(&self, u: Option<LastUndo>) {
+        *self.inner.last_undo.lock().unwrap_or_else(|e| e.into_inner()) = u;
+    }
+
+    pub fn take_last_undo(&self) -> Option<LastUndo> {
+        self.inner.last_undo.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    pub fn peek_last_undo(&self) -> Option<LastUndo> {
+        self.inner.last_undo.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
     /// 打开邮件时：正文没缓存就现拉（独立的读信连接，不排在同步后面）
     pub fn ensure_body(&self, msg_id: i64) -> impl Future<Output = Result<()>> + Send + 'static {
         let me = self.clone();
@@ -466,7 +539,7 @@ impl Engine {
         let mut guard = reader.lock().await;
         for attempt in 0..2 {
             if guard.is_none() {
-                let pw = accounts::password(&store, &acc)?;
+                let pw = accounts::credential(&store, &acc, self.proxy().as_ref()).await?;
                 *guard = Some(Imap::connect(&acc, &pw, self.proxy().as_ref()).await?);
             }
             let c = guard.as_mut().expect("conn");
@@ -548,7 +621,7 @@ impl Engine {
         if !acc.sync_enabled || acc.is_local() {
             return Ok(true);
         }
-        let pw = accounts::password(self.store(), &acc)?;
+        let pw = accounts::credential(self.store(), &acc, self.proxy().as_ref()).await?;
         let mut c = Imap::connect(&acc, &pw, self.proxy().as_ref()).await?;
         c.select("INBOX").await?;
         *established = true;
@@ -649,7 +722,7 @@ impl Worker {
             if acc.is_local() {
                 bail!("本地归档没有服务器");
             }
-            let pw = accounts::password(self.store(), &acc)?;
+            let pw = accounts::credential(self.store(), &acc, self.eng.proxy().as_ref()).await?;
             self.conn = Some(Imap::connect(&acc, &pw, self.eng.proxy().as_ref()).await?);
         }
         Ok(self.conn.as_mut().expect("conn"))
@@ -670,6 +743,19 @@ impl Worker {
                 self.replay(false).await;
                 let out = ids.iter().map(|id| (*id, self.recent.get(id).cloned().unwrap_or(Outcome::Done))).collect();
                 let _ = reply.send(out);
+            }
+            Job::Undo { ids, reply } => {
+                let store = self.store().clone();
+                let mut n = 0;
+                for p in pending::list(&store, self.acc_id).unwrap_or_default().into_iter().filter(|p| ids.contains(&p.id) && p.attempts == 0) {
+                    if pending::done(&store, p.id).is_ok() {
+                        match self.rollback(&p).await {
+                            Ok(()) => n += 1,
+                            Err(e) => log::warn!("[pending] 撤销时恢复本地失败：{e:#}"),
+                        }
+                    }
+                }
+                let _ = reply.send(n);
             }
         }
     }
@@ -706,6 +792,10 @@ impl Worker {
             }
             if background && p.attempts == 0 && p.created_at > fresh_after {
                 break;
+            }
+            // 还在撤销窗口里：跳过（不阻塞后面的标记类操作；窗口结束时提交者会再 Flush）
+            if p.attempts == 0 && p.not_before > now_ms() {
+                continue;
             }
             let _ = pending::begin(&store, p.id);
             let r = self.run_task(&p).await;
@@ -840,7 +930,7 @@ impl Worker {
             c.select(&path).await?;
             let headers = c.fetch_headers(&uids).await?;
             let n = messages::insert_envelopes(&store, &FolderRef { id: fid, account_id: p.account_id }, &headers)?;
-            store.w().execute("UPDATE folders SET total = total + ? WHERE id = ?", params![n, fid])?;
+            store.w().execute("UPDATE folders SET total = total + ? WHERE id = ?", params![n as i64, fid])?;
             touched.insert(fid);
         }
         for fid in touched {
@@ -886,6 +976,18 @@ impl Worker {
                 c.append(path, "(\\Seen)", raw).await
             }
             Op::Append { path, flags, raw } => c.append(path, flags, raw).await,
+            Op::ReplaceDraft { path, raw, old_mid } => {
+                if !raw.is_empty() {
+                    c.append(path, "(\\Draft \\Seen)", raw).await?;
+                }
+                if !old_mid.is_empty() {
+                    let uids = c.find_message_id(path, old_mid).await?;
+                    if !uids.is_empty() {
+                        c.delete_uids(&uids).await?;
+                    }
+                }
+                Ok(())
+            }
         }
     }
 
@@ -1036,9 +1138,18 @@ impl Worker {
         })?;
         messages::remove_files(&store, &orphan_rows);
         let all = folders_of(&store, acc.id)?;
-        // 未读数以服务器为准（本地可能只同步了一部分）
+        // 未读数以服务器为准（本地可能只同步了一部分）。
+        // 支持 LIST-STATUS 的服务器一条命令拿全；否则逐夹 STATUS，但没勾选同步的文件夹 15 分钟才查一次
+        // （以前每轮都对几十个文件夹各发一条 STATUS，Gmail 标签多时很慢）
+        let bulk = self.conn().await?.list_status().await.unwrap_or_default();
+        let due_all = status_due(acc.id);
         for f in &all {
-            if let Ok((total, unseen)) = self.conn().await?.status(&f.path).await {
+            let counts = match bulk.get(&f.path) {
+                Some(c) => Some(*c),
+                None if f.sync_enabled || due_all => self.conn().await?.status(&f.path).await.ok(),
+                None => None,
+            };
+            if let Some((total, unseen)) = counts {
                 store.w().execute("UPDATE folders SET total = ?, unseen = ? WHERE id = ?", params![total, unseen, f.id])?;
             }
         }
@@ -1089,7 +1200,11 @@ impl Worker {
             c.uid_search(&format!("UID {}:*", f.last_uid + 1)).await?.into_iter().filter(|u| *u > f.last_uid).collect()
         };
         let headers = c.fetch_headers(&fresh).await?;
-        let added = messages::insert_envelopes(&store, &fr, &headers)?;
+        let new_ids = messages::insert_envelopes_ids(&store, &fr, &headers)?;
+        let added = new_ids.len();
+        // 本地规则只处理收件箱里增量同步进来的新信（首次同步拉下来的历史邮件不处理）。
+        // 规则要走待办队列、等本 worker 执行，所以必须另起任务，不能在 worker 里直接 await
+        let rule_ids = if f.last_uid > 0 && f.role == "inbox" { new_ids } else { vec![] };
         // 还有待办的行：移动没送达前占位不能清，标记没送达前不拿服务器上的旧值覆盖
         let busy = pending::busy_ids(&store.w(), f.account_id)?;
         messages::drop_stale_placeholders(&store, f.id, &busy)?;
@@ -1183,6 +1298,17 @@ impl Worker {
             "UPDATE folders SET uidvalidity = ?, modseq = ?, last_uid = ?, oldest_uid = ?, total = ?, backfill_done = ?, synced_at = ? WHERE id = ?",
             params![uv, info.highest_modseq.map(|m| m.to_string()).unwrap_or_default(), max_uid, min_uid, info.exists, backfill_done as i64, now_ms(), f.id],
         )?;
+        // 本地规则只处理收件箱里增量同步进来的新信（首次同步拉下来的历史邮件不处理）。
+        // 规则要走待办队列、等本 worker 执行，所以必须另起任务，不能在 worker 里直接 await
+        if !rule_ids.is_empty() {
+            let eng = self.eng.clone();
+            self.eng.spawn(async move {
+                let n = super::rules::apply(&eng, &rule_ids).await;
+                if n > 0 {
+                    log::info!("[rules] 本地规则处理了 {n} 封新信");
+                }
+            });
+        }
         Ok(added)
     }
 
@@ -1191,31 +1317,33 @@ impl Worker {
             return Ok(());
         }
         let store = self.store().clone();
-        let todo: Vec<(i64, u32)> = {
-            let c = store.w();
+        let todo: Vec<(i64, u32, i64)> = {
+            let c = store.r();
             let mut st = c.prepare(
-                "SELECT id, uid FROM (SELECT id, uid, body_state, size, date FROM messages WHERE folder_id = ? ORDER BY date DESC LIMIT ?)
+                "SELECT id, uid, size FROM (SELECT id, uid, body_state, size, date FROM messages WHERE folder_id = ? ORDER BY date DESC LIMIT ?)
                  WHERE body_state = 0 AND size <= ? AND uid > 0 ORDER BY date DESC",
             )?;
             let v = st
-                .query_map(params![f.id, s.prefetch_bodies, s.max_prefetch_size as i64], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u32)))?
+                .query_map(params![f.id, s.prefetch_bodies, s.max_prefetch_size as i64], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u32, r.get(2)?)))?
                 .collect::<Result<Vec<_>, _>>()?;
             v
         };
         if todo.is_empty() {
             return Ok(());
         }
+        // 按字节分批：一批最多 PREFETCH_BATCH_BYTES 或 PREFETCH_BATCH_MAX 封。
+        // 以前固定 10 封一批，碰上 10 封 5 MB 的附件信，一条 FETCH 要传 50 MB，慢网下必然超时；
         // AgentMail 一次取多封原文会超时，逐封取
-        let chunk = if acc.provider == "agentmail" { 1 } else { 10 };
+        let max_n = if acc.provider == "agentmail" { 1 } else { PREFETCH_BATCH_MAX };
         self.conn().await?.select(&f.path).await?;
-        for part in todo.chunks(chunk) {
+        for part in batches_by_bytes(&todo, PREFETCH_BATCH_BYTES, max_n) {
             self.pump_ops().await;
             let c = self.conn().await?;
             c.ensure_selected(&f.path).await?;
             let uids: Vec<u32> = part.iter().map(|p| p.1).collect();
             let got = c.fetch_raw_many(&uids).await?;
             let map: HashMap<u32, Vec<u8>> = got.into_iter().collect();
-            for (id, uid) in part {
+            for (id, uid, _) in part {
                 match map.get(uid) {
                     Some(raw) => {
                         if messages::store_body(&store, *id, raw).is_err() {
@@ -1317,9 +1445,59 @@ pub fn folders_of(store: &Store, acc_id: i64) -> Result<Vec<Folder>> {
     Ok(v)
 }
 
+/// 预取正文一批的字节上限与封数上限
+const PREFETCH_BATCH_BYTES: i64 = 2 * 1024 * 1024;
+const PREFETCH_BATCH_MAX: usize = 20;
+
+/// 按大小切批：累计超过 `max_bytes` 或封数到 `max_n` 就开新批；单封超过上限的自成一批
+fn batches_by_bytes<T>(items: &[(i64, u32, T)], max_bytes: i64, max_n: usize) -> Vec<&[(i64, u32, T)]>
+where
+    T: Copy + Into<i64>,
+{
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut bytes = 0i64;
+    for (i, it) in items.iter().enumerate() {
+        let sz: i64 = it.2.into();
+        if i > start && (bytes + sz > max_bytes || i - start >= max_n) {
+            out.push(&items[start..i]);
+            start = i;
+            bytes = 0;
+        }
+        bytes += sz;
+    }
+    if start < items.len() {
+        out.push(&items[start..]);
+    }
+    out
+}
+
+/// 没勾选同步的文件夹多久查一次 STATUS
+const STATUS_EVERY: Duration = Duration::from_secs(15 * 60);
+
+/// 这个账号的「全量 STATUS」是否到期（到期即记下本次时间）
+fn status_due(acc_id: i64) -> bool {
+    static LAST: std::sync::LazyLock<Mutex<HashMap<i64, Instant>>> = std::sync::LazyLock::new(Default::default);
+    let mut m = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    let due = m.get(&acc_id).is_none_or(|t| t.elapsed() >= STATUS_EVERY);
+    if due {
+        m.insert(acc_id, Instant::now());
+    }
+    due
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prefetch_batches() {
+        let items: Vec<(i64, u32, i64)> = vec![(1, 1, 100), (2, 2, 100), (3, 3, 5000), (4, 4, 50), (5, 5, 50), (6, 6, 50)];
+        let b = batches_by_bytes(&items, 1000, 2);
+        let ids: Vec<Vec<i64>> = b.iter().map(|p| p.iter().map(|x| x.0).collect()).collect();
+        assert_eq!(ids, vec![vec![1, 2], vec![3], vec![4, 5], vec![6]]);
+        assert!(batches_by_bytes::<i64>(&[], 10, 10).is_empty());
+    }
 
     #[test]
     fn reconcile_plan_skips_unchanged() {

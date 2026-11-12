@@ -8,7 +8,16 @@ use super::net::{self, Conn, Proxy};
 use anyhow::{anyhow, bail, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufReader};
+
+/// 普通命令的写超时
+const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 正文的写超时：按大小放宽（最慢按 20 KB/s 估算），至少 2 分钟
+fn data_timeout(len: usize) -> Duration {
+    Duration::from_secs((120 + len as u64 / (20 * 1024)).min(3600))
+}
 
 struct Smtp {
     io: BufReader<Conn>,
@@ -42,19 +51,41 @@ impl Smtp {
     }
 
     async fn cmd(&mut self, line: &str) -> Result<Reply> {
-        let w = self.io.get_mut();
-        w.write_all(line.as_bytes()).await?;
-        w.write_all(b"\r\n").await?;
-        w.flush().await?;
+        let mut buf = Vec::with_capacity(line.len() + 2);
+        buf.extend_from_slice(line.as_bytes());
+        buf.extend_from_slice(b"\r\n");
+        self.write(&buf, WRITE_TIMEOUT).await?;
         self.read().await
+    }
+
+    /// 写入带超时：服务器停止读取（窗口满）时不会无限挂住发信
+    async fn write(&mut self, data: &[u8], limit: Duration) -> Result<()> {
+        let w = self.io.get_mut();
+        tokio::time::timeout(limit, async {
+            w.write_all(data).await?;
+            w.flush().await
+        })
+        .await
+        .map_err(|_| anyhow!("向 SMTP 服务器写入超时（{} 秒）", limit.as_secs()))??;
+        Ok(())
     }
 
     async fn expect(&mut self, line: &str, ok: &[u16], what: &str) -> Result<Reply> {
         let r = self.cmd(line).await?;
         if !ok.contains(&r.code) {
-            bail!("{what}被拒绝：{} {}", r.code, r.text());
+            return Err(reply_error(&r, &format!("{what}被拒绝")));
         }
         Ok(r)
+    }
+}
+
+/// 5xx 是永久性错误（收件人不存在、内容被拒…），重试也一样：标为「拒绝」；4xx 是临时错误，可以稍后重试
+fn reply_error(r: &Reply, what: &str) -> anyhow::Error {
+    let msg = format!("{what}：{} {}", r.code, r.text());
+    if r.code >= 500 {
+        super::error::rejected(msg)
+    } else {
+        super::error::connection(msg)
     }
 }
 
@@ -96,7 +127,17 @@ async fn open(acc: &Account, password: &str, proxy: Option<&Proxy>) -> Result<Sm
             format!("SMTP 登录失败：{base}")
         }
     };
-    if auth_line.contains("PLAIN") || !auth_line.contains("LOGIN") {
+    if acc.is_oauth() {
+        let token = B64.encode(super::oauth::xoauth2(&acc.email, password));
+        let mut r = s.cmd(&format!("AUTH XOAUTH2 {token}")).await?;
+        if r.code == 334 {
+            // 服务器回了一段 base64 的错误详情：按 RFC 回空行结束，拿到最终的失败码
+            r = s.cmd("").await?;
+        }
+        if r.code != 235 {
+            return Err(super::error::auth(format!("SMTP OAuth 登录被拒绝：{} {}（请在账号设置里重新登录）", r.code, r.text())));
+        }
+    } else if auth_line.contains("PLAIN") || !auth_line.contains("LOGIN") {
         let token = B64.encode(format!("\0{}\0{}", acc.email, password));
         let r = s.cmd(&format!("AUTH PLAIN {token}")).await?;
         if r.code != 235 {
@@ -157,16 +198,12 @@ pub async fn send(acc: &Account, password: &str, proxy: Option<&Proxy>, rcpts: &
         s.expect(&format!("RCPT TO:<{}>", r.trim()), &[250, 251], &format!("收件人 {r} ")).await?;
     }
     s.expect("DATA", &[354], "DATA").await?;
-    let body = dot_stuff(raw);
-    {
-        let w = s.io.get_mut();
-        w.write_all(&body).await?;
-        w.write_all(b".\r\n").await?;
-        w.flush().await?;
-    }
+    let mut body = dot_stuff(raw);
+    body.extend_from_slice(b".\r\n");
+    s.write(&body, data_timeout(body.len())).await?;
     let r = s.read().await?;
     if r.code != 250 {
-        bail!("服务器拒收邮件：{} {}", r.code, r.text());
+        return Err(reply_error(&r, "服务器拒收邮件"));
     }
     let _ = s.cmd("QUIT").await;
     Ok(())
@@ -187,5 +224,12 @@ mod tests {
         assert_eq!(dot_stuff(b"a\n.b\r\n..c"), b"a\r\n..b\r\n...c\r\n");
         assert_eq!(dot_stuff(b".x\r\n"), b"..x\r\n");
         assert_eq!(dot_stuff(b"x\ry"), b"x\r\ny\r\n");
+    }
+
+    #[test]
+    fn data_timeout_scales() {
+        assert_eq!(data_timeout(0).as_secs(), 120);
+        assert_eq!(data_timeout(20 * 1024 * 100).as_secs(), 220);
+        assert_eq!(data_timeout(usize::MAX / 2).as_secs(), 3600);
     }
 }

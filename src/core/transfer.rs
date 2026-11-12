@@ -128,6 +128,20 @@ pub struct ImportStat {
 }
 
 fn import_one(store: &Store, acc_id: i64, folder_id: i64, raw: &[u8], st: &mut ImportStat) {
+    match import_raw(store, acc_id, folder_id, raw) {
+        Ok(true) => st.imported += 1,
+        Ok(false) => st.skipped += 1,
+        Err(e) => {
+            st.failed += 1;
+            if st.errors.len() < 5 {
+                st.errors.push(format!("{e:#}"));
+            }
+        }
+    }
+}
+
+/// 导入一封原文到本地文件夹；返回 false 表示按 Message-ID 判定已存在而跳过
+pub fn import_raw(store: &Store, acc_id: i64, folder_id: i64, raw: &[u8]) -> Result<bool> {
     let r = (|| -> Result<bool> {
         let Some(p) = parse::parse_full(raw) else { bail!("无法解析邮件") };
         let e = &p.env;
@@ -146,8 +160,8 @@ fn import_one(store: &Store, acc_id: i64, folder_id: i64, raw: &[u8], st: &mut I
             let c = store.w();
             let uid: i64 = c.query_row("SELECT COALESCE(MAX(uid), 0) + 1 FROM messages WHERE folder_id = ?", [folder_id], |r| r.get(0))?;
             c.execute(
-                "INSERT INTO messages (account_id, folder_id, uid, message_id, in_reply_to, refs, subject, from_name, from_addr, to_json, cc_json, reply_to, date, size, seen, flagged)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO messages (account_id, folder_id, uid, message_id, in_reply_to, refs, subject, from_name, from_addr, to_json, cc_json, reply_to, date, size, seen, flagged, thread)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 params![
                     acc_id,
                     folder_id,
@@ -164,24 +178,18 @@ fn import_one(store: &Store, acc_id: i64, folder_id: i64, raw: &[u8], st: &mut I
                     e.date.unwrap_or_else(now_ms),
                     raw.len() as i64,
                     seen as i64,
-                    flagged as i64
+                    flagged as i64,
+                    e.thread_key()
                 ],
             )?;
-            c.last_insert_rowid()
+            let id = c.last_insert_rowid();
+            messages::fix_thread(&c, id)?;
+            id
         };
         messages::store_body(store, id, raw)?;
         Ok(true)
     })();
-    match r {
-        Ok(true) => st.imported += 1,
-        Ok(false) => st.skipped += 1,
-        Err(e) => {
-            st.failed += 1;
-            if st.errors.len() < 5 {
-                st.errors.push(format!("{e:#}"));
-            }
-        }
-    }
+    r
 }
 
 /// 导入一个文件；progress(已处理封数, 百分比)

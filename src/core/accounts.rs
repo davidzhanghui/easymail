@@ -107,8 +107,14 @@ pub fn draft(input: &AccountInput, existing: Option<&Account>) -> Result<Account
     })
 }
 
-pub fn clean_password(p: &str) -> String {
-    p.chars().filter(|c| !c.is_whitespace()).collect()
+/// 授权码 / 应用专用密码类的服务商：网页上显示成「abcd efgh ijkl mnop」，粘贴时常带空格，去掉不影响登录。
+/// 自定义服务器的密码原样保留（真实密码里可能就有空格），只去掉首尾的换行。
+pub fn clean_password(provider: &str, p: &str) -> String {
+    if matches!(provider, "gmail" | "qq" | "netease163" | "icloud" | "yahoo" | "outlook" | "agentmail" | "aliyun" | "sina" | "sohu" | "china139") {
+        p.chars().filter(|c| !c.is_whitespace()).collect()
+    } else {
+        p.trim_matches(['\r', '\n']).to_string()
+    }
 }
 
 pub fn create(store: &Store, acc: &Account, password: &str, name: &str, signature: &str) -> Result<Account> {
@@ -118,7 +124,7 @@ pub fn create(store: &Store, acc: &Account, password: &str, name: &str, signatur
     }
     let n: i64 = store.r().query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get(0))?;
     let display = if name.trim().is_empty() { acc.email.split('@').next().unwrap_or("").to_string() } else { name.trim().to_string() };
-    let secret = store.crypto().encrypt(&clean_password(password));
+    let secret = store.crypto().encrypt(&clean_password(&acc.provider, password));
     let id = {
         let c = store.w();
         c.execute(
@@ -174,7 +180,7 @@ pub fn update(store: &Store, id: i64, p: &AccountPatch) -> Result<(Account, bool
             c.execute("UPDATE accounts SET sync_enabled = ? WHERE id = ?", params![s as i64, id])?;
         }
         if let Some(pw) = p.password.as_ref().filter(|p| !p.trim().is_empty()) {
-            c.execute("UPDATE accounts SET secret = ? WHERE id = ?", params![store.crypto().encrypt(&clean_password(pw)), id])?;
+            c.execute("UPDATE accounts SET secret = ? WHERE id = ?", params![store.crypto().encrypt(&clean_password(&a.provider, pw)), id])?;
         }
         c.execute("UPDATE accounts SET last_error = '' WHERE id = ?", [id])?;
         Ok(())
@@ -194,7 +200,41 @@ pub fn set_error(store: &Store, id: i64, msg: &str) {
 }
 
 pub fn password(store: &Store, acc: &Account) -> Result<String> {
-    Ok(clean_password(&store.crypto().decrypt(&acc.secret)?))
+    if acc.is_oauth() {
+        anyhow::bail!("该账号使用 OAuth 登录，没有密码");
+    }
+    Ok(clean_password(&acc.provider, &store.crypto().decrypt(&acc.secret)?))
+}
+
+/// 连接服务器用的凭据：密码账号返回密码；OAuth 账号返回（必要时刷新过的）access_token
+pub async fn credential(store: &Store, acc: &Account, proxy: Option<&super::net::Proxy>) -> Result<String> {
+    if acc.is_oauth() {
+        let proxy = super::net::effective_proxy(acc.use_proxy, proxy)?;
+        return super::oauth::access_token(store, acc, proxy).await;
+    }
+    password(store, acc)
+}
+
+/// 新建或更新一个 OAuth 账号（按邮箱地址认）；令牌加密存入 secret
+pub fn save_oauth(store: &Store, d: &Account, token: &super::oauth::Token) -> Result<Account> {
+    let secret = token.to_secret();
+    let existing: Option<i64> = store.r().query_row("SELECT id FROM accounts WHERE email = ?", [&d.email], |r| r.get(0)).optional()?;
+    let id = match existing {
+        Some(id) => {
+            store.w().execute(
+                "UPDATE accounts SET secret = ?, auth = 'oauth2', provider = ?, imap_host = ?, imap_port = ?, smtp_host = ?, smtp_port = ?, smtp_secure = ?, last_error = '' WHERE id = ?",
+                rusqlite::params![store.crypto().encrypt(&secret), d.provider, d.imap_host, d.imap_port as i64, d.smtp_host, d.smtp_port as i64, d.smtp_secure as i64, id],
+            )?;
+            id
+        }
+        None => {
+            let a = create(store, d, "-", &d.name, &d.signature)?;
+            // create 会按密码规则清洗，令牌直接覆盖写入
+            store.w().execute("UPDATE accounts SET auth = 'oauth2', secret = ? WHERE id = ?", rusqlite::params![store.crypto().encrypt(&secret), a.id])?;
+            a.id
+        }
+    };
+    must(store, id)
 }
 
 #[cfg(test)]
@@ -228,5 +268,11 @@ mod tests {
         assert_eq!(list(&s).unwrap().len(), 1);
         assert!(draft(&AccountInput { email: "bad".into(), ..Default::default() }, None).is_err());
         assert!(draft(&AccountInput { email: "a@corp.io".into(), provider: "custom".into(), ..Default::default() }, None).is_err());
+    }
+
+    #[test]
+    fn password_cleaning_is_provider_specific() {
+        assert_eq!(clean_password("gmail", "abcd efgh ijkl mnop"), "abcdefghijklmnop");
+        assert_eq!(clean_password("custom", " pass word \n"), " pass word ", "自定义服务器的密码保留空格");
     }
 }

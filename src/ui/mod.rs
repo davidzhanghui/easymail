@@ -5,6 +5,7 @@ pub mod app;
 #[cfg(feature = "dev")]
 pub mod autotest;
 pub mod composer;
+pub mod freeze;
 pub mod import;
 pub mod line_input;
 pub mod macos;
@@ -42,6 +43,7 @@ icons!(
     "caret",
     "check",
     "clip",
+    "clock",
     "close",
     "download",
     "draft",
@@ -60,20 +62,25 @@ icons!(
     "palette",
     "pen",
     "plus",
+    "outbox",
     "read",
+    "receipt",
     "refresh",
     "reply",
     "panel-right",
     "replyAll",
+    "rule",
     "search",
     "send",
     "sent",
+    "shield",
     "spam",
     "star-fill",
     "star",
     "trash",
     "unread",
     "user",
+    "users",
 );
 
 impl AssetSource for Assets {
@@ -168,6 +175,15 @@ pub fn fmt_size(n: u64) -> String {
     }
 }
 
+/// 列表总数：超过计数上限时显示「10,000+」
+pub fn fmt_total(n: i64) -> String {
+    if n > crate::core::queries::COUNT_CAP {
+        format!("{}+", fmt_num(crate::core::queries::COUNT_CAP))
+    } else {
+        fmt_num(n)
+    }
+}
+
 pub fn fmt_num(n: i64) -> String {
     let s = n.abs().to_string();
     let mut out = String::new();
@@ -218,7 +234,9 @@ actions!(
         Escape,
         ShowWindow,
         HideWindow,
-        CycleTheme
+        CycleTheme,
+        CommandPalette,
+        Undo
     ]
 );
 
@@ -232,6 +250,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-w", HideWindow, None),
         KeyBinding::new("cmd-f", FocusSearch, None),
         KeyBinding::new("cmd-shift-d", CycleTheme, None),
+        KeyBinding::new("cmd-k", CommandPalette, None),
+        // ⌘Z 只在列表 / 阅读区上下文生效，输入框里仍是文本撤销
+        KeyBinding::new("cmd-z", Undo, Some("MailList")),
         // 列表 / 阅读区单键快捷键（输入框获得焦点时不生效：它们只绑定在 MailList 上下文）
         KeyBinding::new("/", FocusSearch, Some("MailList")),
         KeyBinding::new("j", NextMail, Some("MailList")),
@@ -283,6 +304,8 @@ pub fn menus() -> Vec<Menu> {
                 MenuItem::action("转发", Forward),
                 MenuItem::separator(),
                 MenuItem::action("搜索", FocusSearch),
+                MenuItem::action("命令面板…", CommandPalette),
+                MenuItem::action("撤销移动 / 删除", Undo),
             ],
         },
         Menu {

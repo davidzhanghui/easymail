@@ -1,4 +1,4 @@
-//! 本地存档：SQLite（WAL）。表结构与 just-mail 完全一致，旧数据目录可直接打开。
+//! 本地存档：SQLite（WAL）。
 //!
 //! 连接：一条 `write` 给同步引擎与所有写操作，`read` 是一个小连接池给各处的读查询（WAL 下读写、读读互不阻塞）。
 //! messages_fts 用 trigram 分词，中文 / 英文子串都能搜（≥ 3 个字符走 FTS，更短的回退 LIKE）。
@@ -9,6 +9,9 @@ use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
+
+/// 数据库文件名
+pub const DB_NAME: &str = "easymail.db";
 
 pub const SCHEMA: &str = r#"
 PRAGMA journal_mode = WAL;
@@ -127,8 +130,8 @@ CREATE TABLE IF NOT EXISTS uploads (
 );
 "#;
 
-/// 顺序迁移：`PRAGMA user_version` 记录已执行到第几条。上面的 `SCHEMA` 视为版本 0（与 just-mail 一致），
-/// 以后的表结构改动只往这里**追加**，不要改已有的条目。只加表 / 索引，不改 just-mail 已有的列，旧数据目录照常可用。
+/// 顺序迁移：`PRAGMA user_version` 记录已执行到第几条。上面的 `SCHEMA` 视为版本 0，
+/// 以后的表结构改动只往这里**追加**，不要改已有的条目，已有的数据目录照常可用。
 pub const MIGRATIONS: &[&str] = &[
     // 1：持久化的远端操作队列。本地改动与待办在同一个事务里写入，由账号 worker 负责送达服务器，
     //    断网 / 超时就留着下次重放，服务器明确拒绝才按 undo 回滚本地。
@@ -147,7 +150,6 @@ pub const MIGRATIONS: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_msg_unseen ON messages(folder_id) WHERE seen = 0;
      CREATE INDEX IF NOT EXISTS idx_msg_flagged ON messages(folder_id) WHERE flagged = 1;",
     // 3：每个文件夹上次同步时服务器的 EXISTS / UIDNEXT 与上次全量核对的时间。
-    //    单独一张表，不往 just-mail 的 folders 表里加列。
     "CREATE TABLE IF NOT EXISTS folder_sync (
        folder_id   INTEGER PRIMARY KEY REFERENCES folders(id) ON DELETE CASCADE,
        exists_n    INTEGER NOT NULL DEFAULT -1,
@@ -163,6 +165,90 @@ pub const MIGRATIONS: &[&str] = &[
      CREATE TRIGGER IF NOT EXISTS messages_ad_bigram AFTER DELETE ON messages BEGIN
        DELETE FROM messages_bigram WHERE rowid = old.id;
      END;",
+    // 5：待办的「最早执行时间」。移动 / 删除后有几秒的撤销窗口，窗口内 worker 不送达服务器
+    "ALTER TABLE pending_ops ADD COLUMN not_before INTEGER NOT NULL DEFAULT 0;",
+    // 6：会话键。取 References 的第一个（会话的根），没有就取 In-Reply-To，再没有就是自己的 Message-ID。
+    //    打开邮件时的「同一会话」与列表的会话视图都按 (account_id, thread) 走索引，不再全表扫 refs。
+    "ALTER TABLE messages ADD COLUMN thread TEXT NOT NULL DEFAULT '';
+     UPDATE messages SET thread = CASE
+         WHEN trim(refs) != '' THEN substr(trim(refs), 1, instr(trim(refs) || ' ', ' ') - 1)
+         WHEN in_reply_to != '' THEN in_reply_to
+         WHEN message_id != '' THEN message_id
+         ELSE 'id:' || id END;
+     CREATE INDEX IF NOT EXISTS idx_msg_thread ON messages(account_id, thread);",
+    // 7：退订头、服务器写的认证结果（SPF / DKIM / DMARC）、正文里的远程资源域名（追踪像素统计）
+    "ALTER TABLE messages ADD COLUMN unsub TEXT NOT NULL DEFAULT '';
+     ALTER TABLE messages ADD COLUMN unsub_post INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE messages ADD COLUMN auth_res TEXT NOT NULL DEFAULT '';
+     ALTER TABLE messages ADD COLUMN trackers TEXT NOT NULL DEFAULT '';
+     CREATE INDEX IF NOT EXISTS idx_msg_from ON messages(from_addr);",
+    // 8：发件箱：点「发送」先落库，撤回窗口 / 定时时间到了再由引擎发出；离线时一直排队，联网后自动发
+    "CREATE TABLE IF NOT EXISTS outbox (
+       id          INTEGER PRIMARY KEY,
+       account_id  INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+       draft_id    INTEGER,
+       payload     TEXT NOT NULL,
+       subject     TEXT NOT NULL DEFAULT '',
+       rcpt        TEXT NOT NULL DEFAULT '',
+       send_at     INTEGER NOT NULL,
+       state       TEXT NOT NULL DEFAULT 'queued',
+       attempts    INTEGER NOT NULL DEFAULT 0,
+       last_error  TEXT NOT NULL DEFAULT '',
+       created_at  INTEGER NOT NULL
+     );
+     CREATE INDEX IF NOT EXISTS idx_outbox_due ON outbox(state, send_at);",
+    // 9：本地规则：新信入库后按发件人 / 收件人 / 主题匹配，执行移动 / 标记 / 星标 / 归档 / 删除
+    "CREATE TABLE IF NOT EXISTS rules (
+       id          INTEGER PRIMARY KEY,
+       account_id  INTEGER REFERENCES accounts(id) ON DELETE CASCADE,
+       field       TEXT NOT NULL,
+       value       TEXT NOT NULL,
+       action      TEXT NOT NULL,
+       target      INTEGER,
+       enabled     INTEGER NOT NULL DEFAULT 1,
+       hits        INTEGER NOT NULL DEFAULT 0,
+       created_at  INTEGER NOT NULL
+     );",
+    // 10：稍后处理：到点前不出现在列表里，到点后标为未读重新出现
+    "CREATE TABLE IF NOT EXISTS snoozed (
+       message_id  INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+       until       INTEGER NOT NULL
+     );
+     CREATE INDEX IF NOT EXISTS idx_snooze_until ON snoozed(until);",
+    // 11：始终显示远程图片的发件人
+    "CREATE TABLE IF NOT EXISTS remote_allow (
+       address     TEXT PRIMARY KEY,
+       created_at  INTEGER NOT NULL
+     );",
+    // 12：账号间搬家的进度（断点续传）：已经复制过的源邮件
+    "CREATE TABLE IF NOT EXISTS copy_done (
+       job         TEXT NOT NULL,
+       message_id  INTEGER NOT NULL,
+       PRIMARY KEY (job, message_id)
+     );",
+    // 13：登录方式。password = 密码 / 授权码；oauth2 = XOAUTH2（secret 里存加密后的令牌 JSON）
+    "ALTER TABLE accounts ADD COLUMN auth TEXT NOT NULL DEFAULT 'password';",
+    // 14：草稿同步到服务器「草稿箱」后的 Message-ID（下次保存时替换掉旧副本；发出 / 丢弃时删掉）
+    "ALTER TABLE drafts ADD COLUMN remote_mid TEXT NOT NULL DEFAULT '';
+     ALTER TABLE drafts ADD COLUMN remote_account INTEGER;",
+    // 15：发件箱 id 改为 AUTOINCREMENT：撤回会删行，复用 rowid 会让旧提示条上的「撤回」误撤另一封
+    "CREATE TABLE outbox_v2 (
+       id          INTEGER PRIMARY KEY AUTOINCREMENT,
+       account_id  INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+       draft_id    INTEGER,
+       payload     TEXT NOT NULL,
+       subject     TEXT NOT NULL DEFAULT '',
+       rcpt        TEXT NOT NULL DEFAULT '',
+       send_at     INTEGER NOT NULL,
+       state       TEXT NOT NULL DEFAULT 'queued',
+       attempts    INTEGER NOT NULL DEFAULT 0,
+       last_error  TEXT NOT NULL DEFAULT '',
+       created_at  INTEGER NOT NULL
+     );
+     INSERT INTO outbox_v2 SELECT id, account_id, draft_id, payload, subject, rcpt, send_at, state, attempts, last_error, created_at FROM outbox;
+     DROP TABLE outbox;
+     ALTER TABLE outbox_v2 RENAME TO outbox;
+     CREATE INDEX IF NOT EXISTS idx_outbox_due ON outbox(state, send_at);",
 ];
 
 /// 二元组索引是否已覆盖全部老数据（没补完时两字词搜索退回 LIKE，结果不缺）
@@ -242,7 +328,7 @@ impl Store {
         for d in ["", "eml", "uploads"] {
             std::fs::create_dir_all(dir.join(d)).with_context(|| format!("无法创建数据目录 {}", dir.display()))?;
         }
-        let path = dir.join("just-mail.db");
+        let path = dir.join(DB_NAME);
         let mut write = Connection::open(&path).with_context(|| format!("无法打开数据库 {}", path.display()))?;
         write.busy_timeout(std::time::Duration::from_secs(10))?;
         write.execute_batch(SCHEMA)?;
@@ -479,7 +565,7 @@ mod tests {
         let back = s.save_settings(&st).unwrap();
         assert_eq!(back.sync_interval_min, 9);
         assert_eq!(back.proxy_url, "http://127.0.0.1:1087");
-        // just-mail 写入的 JSON 形态
+        // 布尔值按 JSON 存
         s.w().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('backfill','false')", []).unwrap();
         assert!(!s.settings().backfill);
         s.set_kv("theme", "midnight");

@@ -1,4 +1,4 @@
-//! 写信 / 回复 / 转发。对应 just-mail 的 Composer.jsx：联系人补全、抄送密送、附件（选择 / 拖入）、
+//! 写信 / 回复 / 转发：联系人补全、抄送密送、附件（选择 / 拖入）、
 //! ⌘↵ 发送。正文是富文本编辑器（见 `crate::editor`）：加粗 / 斜体 / 字体颜色 / 列表 / 链接 / 表情 / 图片，思路参照 Gmail。
 
 use super::line_input::{InputEvent, LineInput};
@@ -23,12 +23,23 @@ pub fn bind_keys(cx: &mut App) {
 }
 
 pub enum ComposerEvent {
-    Closed { saved: bool },
+    Closed {
+        saved: bool,
+    },
     Sent(SendResult),
+    /// 已放进发件箱：`send_at` 到点后由引擎发出（撤回窗口 / 定时发送）
+    Queued {
+        outbox_id: i64,
+        send_at: i64,
+        scheduled: bool,
+    },
     Toast(String, bool),
 }
 
 impl EventEmitter<ComposerEvent> for Composer {}
+
+/// 最后一次输入后多久自动保存草稿
+const AUTOSAVE_MS: u64 = 2_500;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Field {
@@ -158,6 +169,12 @@ pub struct Composer {
     pub sending: bool,
     dirty: bool,
     save_gen: u64,
+    /// 自动保存的防抖任务：最后一次输入 2.5 秒后存草稿
+    autosave: Option<Task<()>>,
+    /// 定时发送菜单是否展开
+    schedule_menu: bool,
+    /// 回复模板菜单是否展开
+    template_menu: bool,
     suggest: Vec<Contact>,
     suggest_for: Option<Field>,
     /// 联系人补全的请求代号：后台查询回来时只认最新一次输入的结果
@@ -278,6 +295,9 @@ impl Composer {
             sending: false,
             dirty: false,
             save_gen: 0,
+            autosave: None,
+            schedule_menu: false,
+            template_menu: false,
             suggest: vec![],
             suggest_for: None,
             suggest_gen: 0,
@@ -640,11 +660,34 @@ impl Composer {
         !d.to.trim().is_empty() || !d.subject.trim().is_empty() || !mailer::body_is_blank(&d.body) || !d.attachments.is_empty()
     }
 
-    /// 有改动：只标记，不自动存草稿（草稿只在点「保存为草稿」时才存）
+    /// 有改动：标记，并在最后一次输入 2.5 秒后自动存草稿（崩溃 / 误关窗口都不会丢稿）
     fn touch(&mut self, cx: &mut Context<Self>) {
         self.dirty = true;
         self.save_gen += 1;
+        let gen = self.save_gen;
+        self.autosave = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            cx.background_executor().timer(Duration::from_millis(AUTOSAVE_MS)).await;
+            this.update(cx, |c, cx| {
+                if c.save_gen == gen && !c.sending && c.dirty {
+                    c.save_draft(cx);
+                }
+            })
+            .ok();
+        }));
         cx.notify();
+    }
+
+    /// 草稿同步到服务器的「草稿箱」（后台进行，失败只记日志）
+    fn sync_remote(&self) {
+        if let Some(id) = self.draft.id {
+            let eng = self.eng.clone();
+            let fut = self.eng.call(mailer::sync_draft(eng, id));
+            self.eng.spawn(async move {
+                if let Err(e) = fut.await {
+                    log::warn!("[draft] 同步到服务器草稿箱失败：{e:#}");
+                }
+            });
+        }
     }
 
     pub fn save_draft(&mut self, cx: &mut Context<Self>) -> Option<i64> {
@@ -678,12 +721,26 @@ impl Composer {
             return;
         }
         self.collect(cx);
-        // Esc / ✕：直接丢弃这次编辑，不存草稿。若这封本来就是已保存的草稿，保留它原来的版本
-        if self.draft.id.is_none() {
-            self.drop_uploads();
+        // Esc / ✕：有内容就存为草稿再关（以前直接丢弃，写了半天的信一按 Esc 就没了）；空信直接关
+        if !self.has_content() {
+            if self.draft.id.is_none() {
+                self.drop_uploads();
+            }
+            self.save_gen += 1;
+            cx.emit(ComposerEvent::Closed { saved: false });
+            return;
+        }
+        let changed = self.dirty;
+        self.save_draft(cx);
+        if self.dirty {
+            // 保存失败：不关窗口，免得丢稿（错误已提示）
+            return;
+        }
+        if changed {
+            self.sync_remote();
         }
         self.save_gen += 1;
-        cx.emit(ComposerEvent::Closed { saved: false });
+        cx.emit(ComposerEvent::Closed { saved: changed });
     }
 
     /// 显式保存为草稿并关闭窗口
@@ -699,6 +756,7 @@ impl Composer {
         self.dirty = true;
         self.save_draft(cx);
         if self.draft.id.is_some() && !self.dirty {
+            self.sync_remote();
             self.save_gen += 1;
             cx.emit(ComposerEvent::Closed { saved: true });
         }
@@ -734,7 +792,8 @@ impl Composer {
         let store = self.eng.store();
         match self.draft.id {
             Some(id) => {
-                let _ = mailer::delete_draft(store, id, false);
+                let _ = store;
+                let _ = mailer::delete_draft_everywhere(&self.eng, id, false);
             }
             None => self.drop_uploads(),
         }
@@ -769,15 +828,16 @@ impl Composer {
     }
 
     pub fn do_send(&mut self, cx: &mut Context<Self>) {
-        self.sending = true;
+        self.send_at(None, cx);
+    }
+
+    /// 放进发件箱：`at` 为 None 时按撤回窗口（默认 5 秒）发出，否则定时发送。
+    /// 草稿先存好：撤回后信回到草稿；断网时信留在发件箱里，联网后自动发出
+    pub fn send_at(&mut self, at: Option<i64>, cx: &mut Context<Self>) {
+        self.schedule_menu = false;
         self.dirty = true;
         self.save_gen += 1;
-        let draft_id = {
-            self.sending = false;
-            let id = self.save_draft(cx);
-            self.sending = true;
-            id
-        };
+        let draft_id = self.save_draft(cx);
         let d = &self.draft;
         let o = Outgoing {
             account_id: d.account_id.unwrap_or_default(),
@@ -792,25 +852,26 @@ impl Composer {
             include_original: d.include_original,
             draft_id,
         };
-        let eng = self.eng.clone();
-        let fut = self.eng.call(mailer::send(eng, o));
+        match crate::core::outbox::enqueue(self.eng.store(), &o, at) {
+            Ok(id) => {
+                let send_at = at.unwrap_or_else(|| crate::core::db::now_ms() + crate::core::outbox::undo_secs(self.eng.store()) * 1000);
+                self.save_gen += 1;
+                cx.emit(ComposerEvent::Queued { outbox_id: id, send_at, scheduled: at.is_some() });
+            }
+            Err(e) => cx.emit(ComposerEvent::Toast(e.to_string(), true)),
+        }
         cx.notify();
-        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let r = fut.await;
-            this.update(cx, |c, cx| {
-                c.sending = false;
-                match r {
-                    Ok(res) => {
-                        c.save_gen += 1;
-                        cx.emit(ComposerEvent::Sent(res));
-                    }
-                    Err(e) => cx.emit(ComposerEvent::Toast(e.to_string(), true)),
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+    }
+
+    /// 定时发送前的检查（收件人、发件账号）
+    fn schedule(&mut self, at: i64, cx: &mut Context<Self>) {
+        self.collect(cx);
+        if self.draft.to.trim().is_empty() && self.draft.cc.trim().is_empty() && self.draft.bcc.trim().is_empty() {
+            self.schedule_menu = false;
+            cx.emit(ComposerEvent::Toast("请先填写收件人".into(), true));
+            return;
+        }
+        self.send_at(Some(at), cx);
     }
 
     /// 附件拷贝（单个最大 25 MB）在后台做，完成后再挂到草稿上
@@ -1048,8 +1109,8 @@ impl Render for Composer {
                 .size_full(),
             );
         let hint = match self.saved_at {
-            Some(ts) => format!("草稿已保存 {}", &fmt_full(ts)[11..]),
-            None => "⌘ + Enter 发送".into(),
+            Some(ts) => format!("草稿已自动保存 {}", &fmt_full(ts)[11..]),
+            None => "⌘ + Enter 发送 · 输入后自动保存草稿".into(),
         };
 
         let overlay = self.preview.clone().map(|(name, path)| {
@@ -1159,15 +1220,104 @@ impl Render for Composer {
                         crate::core::mailer::MAX_UPLOAD / 1024 / 1024
                     ))),
             )
+            .when(self.template_menu, |d| {
+                let list = crate::ui::app::panels::load_templates(self.eng.store());
+                let mut menu = div()
+                    .mx(px(22.))
+                    .mb(px(8.))
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(2.))
+                    .p(px(6.))
+                    .rounded(px(10.))
+                    .bg(t.panel)
+                    .border_1()
+                    .border_color(t.border)
+                    .shadow(vec![BoxShadow { color: t.shadow, offset: point(px(0.), px(8.)), blur_radius: px(24.), spread_radius: px(0.) }])
+                    .child(div().px(px(10.)).py(px(6.)).text_size(px(11.5)).text_color(t.muted).child(if list.is_empty() {
+                        "还没有模板：⌘K →「回复模板」添加"
+                    } else {
+                        "插入到光标处"
+                    }));
+                for (i, tp) in list.into_iter().enumerate() {
+                    let body = tp.body.clone();
+                    menu = menu.child(
+                        div()
+                            .id(("tpl", i))
+                            .px(px(10.))
+                            .py(px(7.))
+                            .rounded(px(6.))
+                            .text_size(px(13.))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(t.row_hover))
+                            .child(tp.name)
+                            .on_click(cx.listener(move |c, _, _, cx| {
+                                c.template_menu = false;
+                                c.insert_body_text(&body, cx);
+                                c.touch(cx);
+                                cx.notify();
+                            })),
+                    );
+                }
+                d.child(menu)
+            })
+            .when(self.schedule_menu, |d| {
+                let mut menu = div()
+                    .mx(px(22.))
+                    .mb(px(8.))
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(2.))
+                    .p(px(6.))
+                    .rounded(px(10.))
+                    .bg(t.panel)
+                    .border_1()
+                    .border_color(t.border)
+                    .shadow(vec![BoxShadow { color: t.shadow, offset: point(px(0.), px(8.)), blur_radius: px(24.), spread_radius: px(0.) }])
+                    .child(div().px(px(10.)).py(px(6.)).text_size(px(11.5)).text_color(t.muted).child("定时发送（到点前可在发件箱撤回）"));
+                for (i, (label, at)) in crate::core::snooze::presets().into_iter().enumerate() {
+                    let when = fmt_full(at);
+                    menu = menu.child(
+                        div()
+                            .id(("sched", i))
+                            .px(px(10.))
+                            .py(px(7.))
+                            .rounded(px(6.))
+                            .flex()
+                            .gap(px(6.))
+                            .text_size(px(13.))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(t.row_hover))
+                            .child(label)
+                            .child(div().text_color(t.muted).text_size(px(11.)).child(when[5..16].to_string()))
+                            .on_click(cx.listener(move |c, _, _, cx| c.schedule(at, cx))),
+                    );
+                }
+                d.child(menu)
+            })
             .child(
                 modal_footer(&t)
                     .child(button("discard", &t, Kind::Ghost, Some("trash"), "丢弃", true).on_click(cx.listener(|c, _, w, cx| c.discard(w, cx))))
                     .child(button("attach", &t, Kind::Ghost, Some("clip"), "添加附件", true).on_click(cx.listener(|c, _, _, cx| c.pick_files(cx))))
-                    .child(div().text_size(px(11.5)).text_color(t.muted).child(hint))
-                    .child(div().flex_1())
+                    .child(button("templates", &t, Kind::Ghost, Some("draft"), "模板", true).on_click(cx.listener(|c, _, _, cx| {
+                        c.template_menu = !c.template_menu;
+                        c.schedule_menu = false;
+                        cx.notify();
+                    })))
+                    // 提示文字可收缩：窗口窄时显示省略号，不把「发送」挤出去
+                    .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(11.5)).text_color(t.muted).child(hint))
                     .child(
                         disabled(button("save-draft", &t, Kind::Secondary, Some("draft"), "保存为草稿", false), self.sending)
                             .on_click(cx.listener(|c, _, _, cx| c.save_and_close(cx))),
+                    )
+                    .child(
+                        disabled(button("schedule", &t, Kind::Secondary, Some("clock"), "定时", false), self.sending).on_click(cx.listener(|c, _, _, cx| {
+                            c.schedule_menu = !c.schedule_menu;
+                            c.template_menu = false;
+                            cx.notify();
+                        })),
                     )
                     .child(
                         disabled(button("send", &t, Kind::Primary, Some("send"), if self.sending { "发送中…" } else { "发送" }, false), self.sending)
@@ -1192,7 +1342,6 @@ fn html_weight(html: &str) -> usize {
     html.len() - DATA.find_iter(html).map(|m| m.len()).sum::<usize>()
 }
 
-/// 与 just-mail util.js 的 buildReply 一致
 pub fn build_reply(msg: &Detail, mode: &str, accounts: &[Account]) -> Draft {
     let selfs: std::collections::HashSet<String> = accounts.iter().filter(|a| !a.is_local()).map(|a| a.email.to_lowercase()).collect();
     let acc = accounts.iter().find(|a| a.id == msg.account_id && !a.is_local()).or_else(|| accounts.iter().find(|a| !a.is_local()));

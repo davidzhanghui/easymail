@@ -113,6 +113,8 @@ fn end_to_end_against_greenmail() {
     deliver(&rt, "bob@local.test", "me@local.test", "带引用", "> quoted\nreply", "");
 
     let (tx, mut rx) = futures::channel::mpsc::unbounded();
+    // 端到端测试不需要撤销窗口：移动 / 删除立即送达服务器并等结果
+    easymail::core::pending::UNDO_MS.store(0, std::sync::atomic::Ordering::Relaxed);
     let eng = Engine::new(store.clone(), tx).unwrap();
 
     // ① 首次同步：文件夹 + 信封 + 正文预取
@@ -272,6 +274,52 @@ fn end_to_end_against_greenmail() {
     let local_ids = ids(&store, ListParams { folder_id: Some(im.folder_id), ..Default::default() });
     block_on(eng.call(ops::set_flags(eng.clone(), local_ids.clone(), FlagChange { seen: Some(false), flagged: None }))).unwrap();
     assert_eq!(ids(&store, ListParams { folder_id: Some(im.folder_id), filter: queries::Filter::Unread, ..Default::default() }).len(), local_ids.len());
+
+    // ⑨ 邮箱账号的文件夹管理：新建（子文件夹用服务器分隔符）→ 重命名 → 删除，服务器上实时生效
+    let server_paths = |rt: &tokio::runtime::Runtime| -> Vec<String> {
+        rt.block_on(async {
+            let mut c = Imap::connect(&me, "pw", None).await.unwrap();
+            let v = c.list_folders().await.unwrap().into_iter().map(|f| f.path).collect();
+            c.logout().await;
+            v
+        })
+    };
+    let parent = store.r().query_row("SELECT id FROM folders WHERE account_id = ? AND path = '项目'", [me.id], |r| r.get::<_, i64>(0)).unwrap();
+    let nf = block_on(eng.call(ops::create_folder_any(eng.clone(), me.id, "三期".into(), Some(parent)))).unwrap();
+    assert!(server_paths(&rt).contains(&"项目.三期".to_string()));
+    assert!(block_on(eng.call(ops::create_folder_any(eng.clone(), me.id, "三期".into(), Some(parent)))).is_err(), "同名文件夹应拒绝");
+    block_on(eng.call(ops::rename_folder_any(eng.clone(), nf, "四期".into()))).unwrap();
+    let sp = server_paths(&rt);
+    assert!(sp.contains(&"项目.四期".to_string()) && !sp.contains(&"项目.三期".to_string()), "{sp:?}");
+    let local_path: String = store.r().query_row("SELECT path FROM folders WHERE id = ?", [nf], |r| r.get(0)).unwrap();
+    assert_eq!(local_path, "项目.四期");
+    let inbox = folder_id(&store, me.id, "inbox");
+    assert!(block_on(eng.call(ops::delete_folder_any(eng.clone(), inbox))).is_err(), "系统文件夹不能删");
+    block_on(eng.call(ops::delete_folder_any(eng.clone(), nf))).unwrap();
+    assert!(!server_paths(&rt).contains(&"项目.四期".to_string()));
+    assert!(store.r().query_row("SELECT id FROM folders WHERE id = ?", [nf], |r| r.get::<_, i64>(0)).is_err());
+
+    // ⑩ 发件箱：到点的信由 tick 发出；撤回的信不发；发出后出队
+    use easymail::core::{db::now_ms, outbox};
+    let before = server_uids(&rt, "bob@local.test", "INBOX", "ALL").len();
+    let mk = |subject: &str| Outgoing {
+        account_id: me.id,
+        mode: "new".into(),
+        to: "bob@local.test".into(),
+        subject: subject.into(),
+        text: "outbox".into(),
+        ..Default::default()
+    };
+    let due = outbox::enqueue(&store, &mk("发件箱-到点"), Some(now_ms() - 1)).unwrap();
+    let later = outbox::enqueue(&store, &mk("发件箱-撤回"), Some(now_ms() + 3_600_000)).unwrap();
+    outbox::cancel(&store, later).unwrap();
+    let future = outbox::enqueue(&store, &mk("发件箱-定时"), Some(now_ms() + 3_600_000)).unwrap();
+    let e2 = eng.clone();
+    assert_eq!(block_on(eng.call(async move { Ok(outbox::tick(&e2).await) })).unwrap(), 1);
+    assert_eq!(server_uids(&rt, "bob@local.test", "INBOX", "ALL").len(), before + 1, "只发出到点的一封");
+    let left: Vec<i64> = outbox::list(&store).unwrap().iter().map(|i| i.id).collect();
+    assert_eq!(left, vec![future], "撤回的 id 不会被复用（AUTOINCREMENT）");
+    assert!(future > later && later > due);
     eng.stop_account(me.id);
 }
 
@@ -305,6 +353,8 @@ fn offline_ops_are_queued_and_rejections_roll_back() {
     let mb = deliver(&rt, "bob@local.test", "me@local.test", "B 要移动", "b", "");
     let mc = deliver(&rt, "bob@local.test", "me@local.test", "C 要已读", "c", "");
     let (tx, _rx) = futures::channel::mpsc::unbounded();
+    // 端到端测试不需要撤销窗口：移动 / 删除立即送达服务器并等结果
+    easymail::core::pending::UNDO_MS.store(0, std::sync::atomic::Ordering::Relaxed);
     let eng = Engine::new(store.clone(), tx).unwrap();
     block_on(eng.sync_and_wait(me.id, None, false)).unwrap();
     let inbox = folder_id(&store, me.id, "inbox");

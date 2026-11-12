@@ -17,7 +17,7 @@ scripts/check.sh --no-ui   # 没有图形会话时跳过界面测试
 
 ## 约定
 
-- **表结构**：只往 `src/core/db.rs` 的 `MIGRATIONS` 末尾追加，不改已有条目，不改 just-mail 原有的列。
+- **表结构**：只往 `src/core/db.rs` 的 `MIGRATIONS` 末尾追加，不改已有条目。
 - **远端操作**：标记 / 移动 / 删除走 `pending_ops` 持久化队列（`src/core/pending.rs`），不要直接在 worker 上执行。
 - **vendor/gpui**：尽量不改。必须改时同步更新 `vendor/PATCHES.md` 与 `vendor/gpui-0.2.2.patch`。
 - 新增功能请带测试；不熟悉的领域先看看有没有成熟的开源实现再动手。

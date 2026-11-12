@@ -1,4 +1,4 @@
-//! 由 just-mail 的 tokens.css 生成的 10 套配色（与网页版一一对应）。
+//! 10 套配色。
 
 pub struct Palette {
     pub id: &'static str,

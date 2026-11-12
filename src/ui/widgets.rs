@@ -1,4 +1,4 @@
-//! 通用小部件：按钮、标签、复选框、弹层、模态外壳、表单行。外观对齐 just-mail 的 components.css。
+//! 通用小部件：按钮、标签、复选框、弹层、模态外壳、表单行。
 
 use super::theme::Theme;
 use super::{icon, SANS, SERIF};

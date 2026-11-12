@@ -1,6 +1,6 @@
 //! IMAP 邮箱名的 modified UTF-7 编解码（RFC 3501 §5.1.3）。
 //!
-//! 数据库里存解码后的 UTF-8 路径（与 just-mail 一致），发给服务器时再编码。
+//! 数据库里存解码后的 UTF-8 路径，发给服务器时再编码。
 
 use base64::alphabet::Alphabet;
 use base64::engine::{GeneralPurpose, GeneralPurposeConfig};

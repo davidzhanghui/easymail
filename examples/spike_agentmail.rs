@@ -5,7 +5,7 @@ use std::time::Duration;
 async fn main() -> anyhow::Result<()> {
     let data = std::path::PathBuf::from(std::env::args().nth(1).unwrap());
     let crypto = Crypto::load_or_create(&data.join("master.key"))?;
-    let db = rusqlite::Connection::open_with_flags(data.join("just-mail.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let db = rusqlite::Connection::open_with_flags(data.join(easymail::core::db::DB_NAME), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let (email, secret): (String, String) = db.query_row("select email,secret from accounts where id=5", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
     let pass = crypto.decrypt(&secret)?;
     for q in ["(UID BODY.PEEK[])", "(UID BODY[])", "(UID RFC822)"] {

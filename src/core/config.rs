@@ -16,7 +16,7 @@ pub fn default_data_dir() -> PathBuf {
     dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join(APP_NAME_EN).join("data")
 }
 
-/// 与 just-mail 的 DEFAULT_SETTINGS 同名同义（settings 表里按 JSON 存，旧库直接可用）。
+/// settings 表里按 JSON 存。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -34,7 +34,8 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            proxy_url: std::env::var("PROXY_URL").unwrap_or_else(|_| "socks5://127.0.0.1:1080".into()),
+            // 默认不写死代理地址：首次启动时探测本机常见代理端口（见 `tools::init_proxy`）
+            proxy_url: std::env::var("PROXY_URL").unwrap_or_default(),
             sync_interval_min: 5,
             initial_sync_per_folder: 500,
             backfill: true,

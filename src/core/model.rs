@@ -23,10 +23,12 @@ pub struct Account {
     pub created_at: i64,
     pub last_sync_at: Option<i64>,
     pub last_error: String,
+    /// 登录方式：password / oauth2
+    pub auth: String,
 }
 
 impl Account {
-    pub const COLS: &'static str = "id, email, name, provider, imap_host, imap_port, smtp_host, smtp_port, smtp_secure, use_proxy, secret, color, signature, sync_enabled, sort, created_at, last_sync_at, last_error";
+    pub const COLS: &'static str = "id, email, name, provider, imap_host, imap_port, smtp_host, smtp_port, smtp_secure, use_proxy, secret, color, signature, sync_enabled, sort, created_at, last_sync_at, last_error, auth";
 
     pub fn from_row(r: &Row) -> rusqlite::Result<Self> {
         Ok(Account {
@@ -48,11 +50,16 @@ impl Account {
             created_at: r.get(15)?,
             last_sync_at: r.get(16)?,
             last_error: r.get(17)?,
+            auth: r.get(18)?,
         })
     }
 
     pub fn is_local(&self) -> bool {
         self.provider == super::providers::LOCAL_PROVIDER
+    }
+
+    pub fn is_oauth(&self) -> bool {
+        self.auth == "oauth2"
     }
 
     pub fn display_name(&self) -> &str {
@@ -197,6 +204,8 @@ pub struct ListItem {
     pub account_email: String,
     pub account_name: String,
     pub account_color: String,
+    /// 会话视图：这个会话里（命中筛选条件的）邮件数；平铺视图恒为 1
+    pub thread_count: i64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -234,6 +243,14 @@ pub struct Detail {
     pub folder_role: String,
     pub folder_label: String,
     pub thread: Vec<ThreadItem>,
+    /// List-Unsubscribe 原文
+    pub unsub: String,
+    pub unsub_post: bool,
+    /// Authentication-Results 原文
+    pub auth_res: String,
+    /// "像素数|主机1,主机2"
+    pub trackers: String,
+    pub snoozed_until: Option<i64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -271,6 +288,8 @@ pub struct Stats {
     pub drafts: i64,
     pub archived: i64,
     pub with_body: i64,
+    pub snoozed: i64,
+    pub outbox: i64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

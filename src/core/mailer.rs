@@ -328,6 +328,76 @@ pub fn save_draft(store: &Store, d: &Draft) -> Result<Draft> {
     get_draft(store, id)?.ok_or_else(|| anyhow!("草稿保存失败"))
 }
 
+/// 草稿在服务器上的副本：(账号, Message-ID)
+pub fn draft_remote(store: &Store, id: i64) -> Option<(i64, String)> {
+    store
+        .r()
+        .query_row("SELECT remote_account, remote_mid FROM drafts WHERE id = ? AND remote_mid != ''", [id], |r| {
+            Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, String>(1)?))
+        })
+        .ok()
+        .and_then(|(a, m)| a.map(|a| (a, m)))
+}
+
+/// 把草稿同步到账号的服务器「草稿箱」：APPEND 新副本（\Draft \Seen），再删掉上一次的副本。
+/// 这样换台电脑、用手机网页版都能接着写。没有草稿箱的账号、本地归档不同步。
+pub async fn sync_draft(eng: Engine, id: i64) -> Result<bool> {
+    let store = eng.store().clone();
+    let Some(d) = get_draft(&store, id)? else { return Ok(false) };
+    let old = draft_remote(&store, id);
+    let acc = match d.account_id.and_then(|a| accounts::get(&store, a).ok().flatten()) {
+        Some(a) if !a.is_local() => a,
+        _ => return Ok(false),
+    };
+    // 换了发件账号：旧账号上的副本先删
+    if let Some((old_acc, mid)) = old.as_ref().filter(|(a, _)| *a != acc.id) {
+        delete_remote_draft(&eng, *old_acc, mid).await;
+    }
+    let path: Option<String> = store.r().query_row("SELECT path FROM folders WHERE account_id = ? AND role = 'drafts'", [acc.id], |r| r.get(0)).optional()?;
+    let Some(path) = path else { return Ok(false) };
+    let o = Outgoing {
+        account_id: acc.id,
+        mode: d.mode.clone(),
+        to: d.to.clone(),
+        cc: d.cc.clone(),
+        bcc: d.bcc.clone(),
+        subject: d.subject.clone(),
+        text: d.body.clone(),
+        attachments: d.attachments.clone(),
+        source_id: d.source_id,
+        include_original: false,
+        draft_id: Some(id),
+    };
+    let built = build_draft(&store, &acc, &o)?;
+    let old_mid = old.filter(|(a, _)| *a == acc.id).map(|(_, m)| m).unwrap_or_default();
+    eng.remote(acc.id, Op::ReplaceDraft { path, raw: built.raw_sent, old_mid }).await?;
+    store.w().execute("UPDATE drafts SET remote_mid = ?, remote_account = ? WHERE id = ?", params![built.message_id, acc.id, id])?;
+    Ok(true)
+}
+
+/// 删掉服务器草稿箱里的副本（发出 / 丢弃草稿时）
+pub async fn delete_remote_draft(eng: &Engine, account_id: i64, message_id: &str) {
+    let store = eng.store().clone();
+    let path: Option<String> =
+        store.r().query_row("SELECT path FROM folders WHERE account_id = ? AND role = 'drafts'", [account_id], |r| r.get(0)).optional().ok().flatten();
+    if let Some(path) = path {
+        if let Err(e) = eng.remote(account_id, Op::ReplaceDraft { path, raw: vec![], old_mid: message_id.to_string() }).await {
+            log::warn!("[draft] 删除服务器上的草稿副本失败：{e:#}");
+        }
+    }
+}
+
+/// 删除草稿，连同服务器上的副本（后台进行）
+pub fn delete_draft_everywhere(eng: &Engine, id: i64, keep_uploads: bool) -> Result<()> {
+    let remote = draft_remote(eng.store(), id);
+    delete_draft(eng.store(), id, keep_uploads)?;
+    if let Some((acc, mid)) = remote {
+        let e = eng.clone();
+        eng.spawn(async move { delete_remote_draft(&e, acc, &mid).await });
+    }
+    Ok(())
+}
+
 pub fn delete_draft(store: &Store, id: i64, keep_uploads: bool) -> Result<()> {
     if let Some(d) = get_draft(store, id)? {
         if !keep_uploads {
@@ -417,7 +487,7 @@ fn addr_list(v: &[String]) -> Address<'static> {
 
 // ---------------- 发信 ----------------
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Outgoing {
     pub account_id: i64,
     pub mode: String,
@@ -456,14 +526,24 @@ fn drop_dead_cids(html: &str, have: &[(String, String, Vec<u8>)]) -> String {
 
 /// 组装 MIME 原文。密送对象只出现在 SMTP 信封（`rcpts`）里，投递的原文不带 Bcc 头。
 pub fn build(store: &Store, acc: &super::model::Account, o: &Outgoing, orig_atts: Vec<(String, String, Vec<u8>)>) -> Result<Built> {
-    let to = split_addrs(&o.to);
-    let cc = split_addrs(&o.cc);
-    let bcc = split_addrs(&o.bcc);
-    if to.is_empty() && cc.is_empty() && bcc.is_empty() {
+    build_with(store, acc, o, orig_atts, false)
+}
+
+/// 草稿：收件人可以为空、地址可以没写完
+pub fn build_draft(store: &Store, acc: &super::model::Account, o: &Outgoing) -> Result<Built> {
+    build_with(store, acc, o, vec![], true)
+}
+
+fn build_with(store: &Store, acc: &super::model::Account, o: &Outgoing, orig_atts: Vec<(String, String, Vec<u8>)>, draft: bool) -> Result<Built> {
+    let valid = |a: &String| accounts::valid_email(&parse_addr(a).1);
+    let to: Vec<String> = split_addrs(&o.to).into_iter().filter(|a| !draft || valid(a)).collect();
+    let cc: Vec<String> = split_addrs(&o.cc).into_iter().filter(|a| !draft || valid(a)).collect();
+    let bcc: Vec<String> = split_addrs(&o.bcc).into_iter().filter(|a| !draft || valid(a)).collect();
+    if !draft && to.is_empty() && cc.is_empty() && bcc.is_empty() {
         bail!("收件人为空");
     }
     for a in to.iter().chain(&cc).chain(&bcc) {
-        if !accounts::valid_email(&parse_addr(a).1) {
+        if !valid(a) {
             bail!("收件人地址不正确：{a}");
         }
     }
@@ -584,18 +664,19 @@ pub fn build(store: &Store, acc: &super::model::Account, o: &Outgoing, orig_atts
 
 pub async fn send(eng: Engine, o: Outgoing) -> Result<SendResult> {
     let store = eng.store().clone();
-    let acc = accounts::get(&store, o.account_id)?.ok_or_else(|| anyhow!("请选择发件账号"))?;
+    let acc = accounts::get(&store, o.account_id)?.ok_or_else(|| super::error::rejected("请选择发件账号（原发件账号可能已删除）"))?;
     if acc.is_local() {
-        bail!("「本地归档」是本地目录，不能发信；请在上方选择真实的发件账号");
+        return Err(super::error::rejected("「本地归档」是本地目录，不能发信；请在上方选择真实的发件账号"));
     }
     let mut orig = Vec::new();
     if let Some(src) = o.source_id.filter(|_| o.mode == "forward" && o.include_original) {
         let raw = eng.source(src).await?;
         orig = parse::file_attachments(&raw);
     }
-    let built = build(&store, &acc, &o, orig)?;
-    let pw = accounts::password(&store, &acc)?;
-    smtp::send(&acc, &pw, eng.proxy().as_ref(), &built.rcpts, &built.raw_smtp).await.map_err(|e| anyhow!("发送失败：{e:#}"))?;
+    // 组信失败（附件文件丢了等）重试也没用
+    let built = build(&store, &acc, &o, orig).map_err(|e| super::error::rejected(format!("{e:#}")))?;
+    let pw = accounts::credential(&store, &acc, eng.proxy().as_ref()).await?;
+    smtp::send(&acc, &pw, eng.proxy().as_ref(), &built.rcpts, &built.raw_smtp).await.context("发送失败")?;
 
     let sent: Option<(i64, String)> =
         store.r().query_row("SELECT id, path FROM folders WHERE account_id = ? AND role = 'sent'", [acc.id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
@@ -615,7 +696,7 @@ pub async fn send(eng: Engine, o: Outgoing) -> Result<SendResult> {
         let _ = super::ops::set_answered(eng.clone(), src).await;
     }
     if let Some(d) = o.draft_id {
-        let _ = delete_draft(&store, d, true);
+        let _ = delete_draft_everywhere(&eng, d, true);
     }
     for a in &o.attachments {
         delete_upload(&store, &a.token);

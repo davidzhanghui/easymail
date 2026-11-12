@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 async fn main() -> anyhow::Result<()> {
     let data = std::path::PathBuf::from(std::env::args().nth(1).expect("数据目录"));
     let crypto = Crypto::load_or_create(&data.join("master.key"))?;
-    let db = rusqlite::Connection::open_with_flags(data.join("just-mail.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let db = rusqlite::Connection::open_with_flags(data.join(easymail::core::db::DB_NAME), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     // ③ 旧库 + trigram 中文搜索
     let ver: String = db.query_row("select sqlite_version()", [], |r| r.get(0))?;
     let n: i64 = db.query_row("select count(*) from messages_fts where messages_fts match '\"验证码\"'", [], |r| r.get(0))?;

@@ -166,6 +166,7 @@ fn make_view() -> (Retained<WKWebView>, Retained<NavDelegate>, Retained<MsgHandl
     let mtm = mtm();
     unsafe {
         let config = WKWebViewConfiguration::new(mtm);
+        config.setWebsiteDataStore(&objc2_web_kit::WKWebsiteDataStore::nonPersistentDataStore(mtm));
         let handler = MsgHandler::new(mtm);
         config.userContentController().addScriptMessageHandler_name(ProtocolObject::from_ref(&*handler), &NSString::from_str("em"));
         let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(400., 300.));

@@ -45,6 +45,8 @@ pub struct Caps {
     pub mv: bool,
     pub uidplus: bool,
     pub id: bool,
+    /// RFC 5819：一条 LIST 命令顺带返回每个文件夹的 STATUS
+    pub list_status: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -118,21 +120,37 @@ pub fn explain_login_error(acc: &Account, e: &str) -> String {
 }
 
 impl Imap {
-    pub async fn connect(acc: &Account, password: &str, proxy: Option<&Proxy>) -> Result<Imap> {
+    /// `secret`：密码 / 授权码；OAuth 账号（`acc.is_oauth()`）传 access_token，走 SASL XOAUTH2
+    pub async fn connect(acc: &Account, secret: &str, proxy: Option<&Proxy>) -> Result<Imap> {
         let proxy = net::effective_proxy(acc.use_proxy, proxy)?;
-        // 本机地址的非 993 端口（本机桥接 / 测试服务器）走明文，其余一律 TLS
-        let tls = !(net::is_loopback(&acc.imap_host) && acc.imap_port != 993);
-        let conn = net::connect(&acc.imap_host, acc.imap_port, proxy, tls)
-            .await
-            .with_context(|| format!("连接 {}:{} 失败{}", acc.imap_host, acc.imap_port, if proxy.is_some() { "（经代理）" } else { "" }))?;
+        let loopback = net::is_loopback(&acc.imap_host);
+        let ctx = || format!("连接 {}:{} 失败{}", acc.imap_host, acc.imap_port, if proxy.is_some() { "（经代理）" } else { "" });
+        // 993：直接 TLS；143（非本机）：先明文握手再 STARTTLS 升级，升级失败就断开，绝不明文登录；
+        // 本机地址的其它端口（本机桥接 / 测试服务器）走明文
+        let (conn, greeted) = if acc.imap_port == 143 && !loopback {
+            let tcp = net::tunnel(&acc.imap_host, acc.imap_port, proxy).await.with_context(ctx)?;
+            (starttls(&acc.imap_host, tcp).await.with_context(ctx)?, true)
+        } else {
+            let tls = !(loopback && acc.imap_port != 993);
+            (net::connect(&acc.imap_host, acc.imap_port, proxy, tls).await.with_context(ctx)?, false)
+        };
         let mut client = async_imap::Client::new(conn);
-        match tokio::time::timeout(Duration::from_secs(30), client.read_response()).await {
-            Ok(Some(Ok(_))) => {}
-            Ok(Some(Err(e))) => bail!("读取服务器问候失败：{e}"),
-            Ok(None) => bail!("服务器关闭了连接"),
-            Err(_) => bail!("服务器 30 秒没有问候，可能被墙或端口不对"),
+        if !greeted {
+            match tokio::time::timeout(Duration::from_secs(30), client.read_response()).await {
+                Ok(Some(Ok(_))) => {}
+                Ok(Some(Err(e))) => bail!("读取服务器问候失败：{e}"),
+                Ok(None) => bail!("服务器关闭了连接"),
+                Err(_) => bail!("服务器 30 秒没有问候，可能被墙或端口不对"),
+            }
         }
-        let s = match tokio::time::timeout(CMD_TIMEOUT, client.login(&acc.email, password)).await {
+        let login = async {
+            if acc.is_oauth() {
+                client.authenticate("XOAUTH2", XOAuth2(super::oauth::xoauth2(&acc.email, secret))).await
+            } else {
+                client.login(&acc.email, secret).await
+            }
+        };
+        let s = match tokio::time::timeout(CMD_TIMEOUT, login).await {
             Ok(Ok(s)) => s,
             // 服务器明确拒绝登录 → 认证类错误：停止自动重试，等用户改密码
             Ok(Err((e @ (async_imap::error::Error::No(_) | async_imap::error::Error::Bad(_)), _))) => {
@@ -149,14 +167,11 @@ impl Imap {
             mv: caps.has_str("MOVE"),
             uidplus: caps.has_str("UIDPLUS"),
             id: caps.has_str("ID"),
+            list_status: caps.has_str("LIST-STATUS"),
         };
         if me.caps.id {
             let ver = super::config::VERSION;
-            let _ = timed(
-                "ID",
-                me.ss().id([("name", Some("EasyMail")), ("version", Some(ver)), ("vendor", Some("easymail")), ("support-email", Some("support@easymail.app"))]),
-            )
-            .await;
+            let _ = timed("ID", me.ss().id([("name", Some("EasyMail")), ("version", Some(ver)), ("vendor", Some("easymail"))])).await;
         }
         Ok(me)
     }
@@ -316,6 +331,34 @@ impl Imap {
         Ok((mb.exists, mb.unseen.unwrap_or(0)))
     }
 
+    /// LIST-STATUS（RFC 5819）：一条命令拿到所有文件夹的 (总数, 未读数)，键为 UTF-8 路径。
+    /// 服务器不支持返回空表；结果经 async-imap 的 unsolicited 通道（容量 100）收回，
+    /// 文件夹很多时可能收不全，调用方对缺的再逐个 STATUS。
+    pub async fn list_status(&mut self) -> Result<std::collections::HashMap<String, (u32, u32)>> {
+        use async_imap::types::{StatusAttribute, UnsolicitedResponse};
+        let mut out = std::collections::HashMap::new();
+        if !self.caps.list_status {
+            return Ok(out);
+        }
+        self.drain_unsolicited();
+        timed("读取文件夹状态", self.ss().run_command_and_check_ok("LIST \"\" \"*\" RETURN (STATUS (MESSAGES UNSEEN))")).await?;
+        let s = self.ss();
+        while let Ok(r) = s.unsolicited_responses.try_recv() {
+            if let UnsolicitedResponse::Status { mailbox, attributes } = r {
+                let (mut total, mut unseen) = (0, 0);
+                for a in attributes {
+                    match a {
+                        StatusAttribute::Messages(n) => total = n,
+                        StatusAttribute::Unseen(n) => unseen = n,
+                        _ => {}
+                    }
+                }
+                out.insert(utf7::decode(&mailbox), (total, unseen));
+            }
+        }
+        Ok(out)
+    }
+
     pub async fn store_flag(&mut self, uids: &[u32], flag: &str, add: bool) -> Result<()> {
         if uids.is_empty() {
             return Ok(());
@@ -406,8 +449,7 @@ impl Imap {
     /// 按 Message-ID 在当前选中的文件夹里查 UID（发信后判断服务商是否已自动存了「已发送」）
     pub async fn find_message_id(&mut self, path: &str, message_id: &str) -> Result<Vec<u32>> {
         self.ensure_selected(path).await?;
-        let mid = message_id.replace('"', "");
-        self.uid_search(&format!("HEADER Message-ID \"{mid}\"")).await
+        self.uid_search(&format!("HEADER Message-ID {}", quote(message_id))).await
     }
 
     /// IDLE 等待最多 `dur`；返回 (self, 是否有新动静)。不支持 IDLE 时用 NOOP 代替。
@@ -463,6 +505,73 @@ pub fn uid_set(uids: &[u32]) -> String {
 }
 
 /// 连接测试（添加 / 编辑账号时）：能登录、能列出文件夹即算成功
+/// IMAP 带引号字符串：转义 `\` 和 `"`，去掉换行（RFC 3501 quoted 不允许 CR/LF）
+pub fn quote(s: &str) -> String {
+    let mut o = String::with_capacity(s.len() + 2);
+    o.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' | '"' => {
+                o.push('\\');
+                o.push(c);
+            }
+            '\r' | '\n' => {}
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
+}
+
+/// SASL XOAUTH2：只有一步，初始响应就是全部；服务器若回错误详情（base64 JSON）则回空行结束
+struct XOAuth2(String);
+
+impl async_imap::Authenticator for XOAuth2 {
+    type Response = String;
+    fn process(&mut self, challenge: &[u8]) -> Self::Response {
+        if challenge.is_empty() {
+            std::mem::take(&mut self.0)
+        } else {
+            String::new()
+        }
+    }
+}
+
+/// 明文连上 143 后升级 TLS：读问候 → `a0 STARTTLS` → 等 `a0 OK` → TLS 握手。
+/// 逐字节读，保证不会把 TLS 握手数据读进缓冲区；服务器不支持就报错，不会退回明文。
+async fn starttls(host: &str, mut tcp: tokio::net::TcpStream) -> Result<Conn> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    async fn line(tcp: &mut tokio::net::TcpStream) -> Result<String> {
+        let mut v = Vec::new();
+        let mut b = [0u8; 1];
+        loop {
+            let n = tokio::time::timeout(Duration::from_secs(30), tcp.read(&mut b)).await.map_err(|_| anyhow::anyhow!("服务器响应超时"))??;
+            if n == 0 {
+                bail!("服务器关闭了连接");
+            }
+            v.push(b[0]);
+            if v.ends_with(b"\r\n") || v.len() > 8192 {
+                return Ok(String::from_utf8_lossy(&v).trim_end().to_string());
+            }
+        }
+    }
+    let greet = line(&mut tcp).await?;
+    if !greet.starts_with("* OK") {
+        bail!("服务器问候异常：{greet}");
+    }
+    tcp.write_all(b"a0 STARTTLS\r\n").await?;
+    loop {
+        let l = line(&mut tcp).await?;
+        if let Some(rest) = l.strip_prefix("a0 ") {
+            if rest.to_ascii_uppercase().starts_with("OK") {
+                break;
+            }
+            bail!("服务器不支持 STARTTLS（{rest}），为保护密码已中止连接");
+        }
+    }
+    net::tls_wrap(host, tcp).await
+}
+
 pub async fn test_login(acc: &Account, password: &str, proxy: Option<&Proxy>) -> Result<usize> {
     let mut c = Imap::connect(acc, password, proxy).await?;
     let n = c.list_folders().await?.len();
@@ -487,5 +596,11 @@ mod tests {
         assert_eq!(uid_set(&[5]), "5");
         assert_eq!(uid_set(&[3, 1, 2, 2]), "1:3");
         assert_eq!(uid_set(&[]), "");
+    }
+
+    #[test]
+    fn quoting() {
+        assert_eq!(quote(r#"<a"b\c@x>"#), r#""<a\"b\\c@x>""#);
+        assert_eq!(quote("<a\r\nb>"), "\"<ab>\"");
     }
 }

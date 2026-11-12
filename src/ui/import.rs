@@ -1,4 +1,4 @@
-//! 导入外部邮件（.eml / .mbox）到本地归档。对应 just-mail 的 ImportModal.jsx。
+//! 导入外部邮件（.eml / .mbox）到本地归档。
 
 use super::icon;
 use super::line_input::LineInput;

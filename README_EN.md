@@ -15,19 +15,26 @@
 
 ![Main window](docs/screenshots/02-reader.png)
 
-> The UI is currently in Simplified Chinese (the app is named 迷你邮件, "Mini Mail"). English localization is welcome as a contribution.
+> The UI is currently in Simplified Chinese only (the app is named 迷你邮件, "Mini Mail"). English localization is welcome as a contribution.
 
 ## Features
 
-- **Multiple accounts** — Gmail, NetEase 163 / 126, QQ Mail, AgentMail and any IMAP / SMTP server (password or app password), with a unified inbox
+- **Multiple accounts** — Gmail, Outlook / Microsoft 365, iCloud, Yahoo, Fastmail, NetEase 163 / 126 / enterprise, QQ / Tencent Exmail, Aliyun Mail, 139, Sina, Sohu, AgentMail and any IMAP / SMTP server, with a unified inbox
+- **OAuth sign-in** — Outlook / Microsoft 365 via browser authorization (XOAUTH2), no app password needed; Gmail too (bring your own Google client ID). Custom servers can be auto-configured from the email domain (Thunderbird ISPDB)
 - **Local-first** — envelopes and bodies are cached in SQLite + `.eml` files, readable and searchable offline. Deletes / moves / flags made offline are queued and delivered when you're back online
+- **Undo & unsend** — moves / deletes can be undone for a few seconds (⌘Z); outgoing mail goes through an outbox with a 5-second unsend window by default, scheduled sending, and automatic backoff on network errors
 - **Real-time** — IMAP IDLE (45 s polling fallback), menu-bar tray, Dock badge, system notifications
-- **Full-text search** — substring search for CJK and Latin text (FTS5 trigram + CJK bigram index) with `from:` `to:` `subject:` `is:unread` `is:starred` `has:attachment`
-- **Safe rendering** — WKWebView with JavaScript disabled; a CSP blocks remote images (tracking pixels) until you click "Show images"
-- **Rich-text composer** — reply / reply all / forward, signatures, attachments, inline images, drafts
+- **Full-text search** — substring search for CJK and Latin text (FTS5 trigram + CJK bigram index) with `from:` `to:` `subject:` `filename:` `in:` `is:unread` `is:starred` `has:attachment` `before:` `after:` `larger:` `smaller:` and `-exclude`; save frequent searches to the sidebar
+- **Conversation view** — groups messages by References / In-Reply-To, one row per thread
+- **Organizing** — local rules (auto move / mark / archive new mail), snooze, a per-sender view with bulk read / unsubscribe / delete, one-click unsubscribe (RFC 8058), an invoices view, reply templates and a ⌘K command palette
+- **Privacy & safety** — WKWebView with JavaScript disabled and a non-persistent data store; a CSP blocks remote images by default (allow per sender); blocked tracking pixels and a privacy report; warnings when SPF / DKIM / DMARC fail or a link's text doesn't match its target; tracking parameters (utm_* etc.) are stripped when opening links
+- **Reading helpers** — verification codes detected with one-click copy; flight / train / hotel itineraries
+- **Rich-text composer** — reply / reply all / forward, signatures, attachments, inline images; drafts autosave and sync to the server's Drafts folder
 - **Ten color themes** — seven light, three dark, or follow the system
-- **Import / export** — import `.eml` / `.mbox` into a local archive; export mbox, CSV or a standard maildir
-- **Proxies** — SOCKS5 / HTTP (with auth), per account
+- **Import / export / backup** — import `.eml` / `.mbox` into a local archive; export mbox, CSV or a standard maildir; verified full backups, scheduled incremental export, copy folders between accounts (resumable IMAP copy), and safe cache slimming
+- **CLI & AI access** — `easymail-cli` searches / reads / exports your local library from the terminal and serves a read-only MCP server for local AI tools
+- **Proxies** — SOCKS5 / HTTP (with auth), per account; common local proxy ports are detected on first launch
+- **Connection diagnostics** — step-by-step check of proxy → DNS → port → TLS → login
 
 | Composer | Dark theme |
 | --- | --- |
@@ -56,11 +63,53 @@ scripts/check.sh              # fmt → clippy → unit tests → GreenMail end-
 scripts/check.sh --no-ui      # skip UI tests that need a graphical session
 scripts/build.sh              # package dist/迷你邮件.app and a DMG (arm64 + x86_64 universal binary)
 scripts/screenshots.sh        # regenerate docs/screenshots/ from demo data
+scripts/bench.sh [count]      # large-library benchmark (100k synthetic messages by default, temp dir)
 scripts/push-tag.sh           # tag the Cargo.toml version and push it, triggering the Release workflow
 ```
 
 End-to-end tests run against a local [GreenMail](https://greenmail-mail-test.github.io/greenmail/) (Java, no Docker) for real IMAP / SMTP.
 The jar is not committed; `scripts/fetch-greenmail.sh` downloads a pinned version with checksum into `tools/` (`check.sh` calls it). Requires Java 11+.
+
+Parser fuzz targets live in `fuzz/` (`cargo +nightly fuzz run parse_message`, requires `cargo install cargo-fuzz`); on stable, `cargo test` also runs a randomized mutation test.
+
+### Performance
+
+`scripts/bench.sh` on Apple Silicon with 100,000 messages (median):
+
+| Scenario | Time |
+| --- | --- |
+| Inbox first page, 60 rows (with count) | ~1 ms |
+| Next page | ~2 ms |
+| Full-text search (CJK / Latin / combined) | 22–28 ms |
+| Conversation view first page | ~160 ms |
+| Top 200 senders | ~95 ms |
+
+## CLI & MCP
+
+The packaged `迷你邮件.app/Contents/MacOS/easymail-cli` reads the local library directly (read-only; the app doesn't need to be running):
+
+```bash
+easymail-cli search "from:bob invoice after:2025-01" --limit 20
+easymail-cli show 1234
+easymail-cli export mbox ~/out.mbox "is:starred"
+easymail-cli backup ~/Backups
+easymail-cli mcp          # run the MCP server over stdio
+```
+
+MCP client configuration (tools: `search_mail` / `read_mail` / `list_folders` / `mail_stats`, all read-only — it cannot send or delete mail):
+
+```json
+{
+  "mcpServers": {
+    "easymail": {
+      "command": "/Applications/迷你邮件.app/Contents/MacOS/easymail-cli",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Every tool call is logged to `mcp-audit.log` in the data directory. Connecting an AI tool over MCP means you allow it to read your mail.
 
 ## Data directory
 
@@ -68,22 +117,43 @@ Defaults to `~/Library/Application Support/EasyMail/data`; override with `EASYMA
 
 | File | Contents |
 | --- | --- |
-| `just-mail.db` | SQLite database (WAL). Name kept from the predecessor just-mail for compatibility |
+| `easymail.db` | SQLite database (WAL) |
 | `eml/<account>/<message>.eml` | Raw message cache |
 | `uploads/` | Attachments added while composing (cleaned after sending) |
 | `master.key` | Master key for encrypting mailbox passwords (0600). **Keep it safe when backing up the data directory** |
 | `easymail.log` | Log (rotated at 5 MB; `EASYMAIL_LOG=debug` for more detail) |
-| `panic.log` | Crash information |
+| `panic.log` | Crash information (reported on next launch) |
+| `mcp-audit.log` | Log of MCP / CLI tool calls |
 
 ## Security & privacy
 
-- No telemetry. Apart from your mail servers (and proxy) and remote images you explicitly allow, the app contacts nothing else.
-- Mailbox passwords are encrypted with AES-256-GCM in the local database; the key lives in `master.key` (0600).
+- No telemetry. The app only contacts:
+  - your mail servers (and proxy);
+  - remote images you allow (per message or per sender);
+  - update check: at most once a day, the public GitHub Releases API, with no device identifier; can be turned off in settings;
+  - only when you act: OAuth sign-in (Microsoft / Google authorization servers), server auto-configuration (the domain's own autoconfig and the Thunderbird ISPDB), and one-click unsubscribe (the sender's unsubscribe URL).
+- Passwords / OAuth tokens are encrypted with AES-256-GCM in the local database; the key lives in `master.key` (0600). Full backups include `master.key` — guard the backup like a password.
+- Message bodies (`.eml` files and the database) are not encrypted at rest beyond FileVault; enabling FileVault is recommended.
 - Please report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+
+### Outlook / Microsoft 365 OAuth
+
+The built-in client ID is registered in Azure as a "Mobile and desktop application" with redirect URI `http://localhost`, multi-tenant plus personal Microsoft accounts. If your organization requires its own registration, enter your client ID in settings (it needs `IMAP.AccessAsUser.All`, `SMTP.Send` and `offline_access`). Gmail OAuth needs your own Google Cloud "Desktop app" credentials; without them, keep using an app password.
+
+### Known limitations
+
+- The UI is Simplified Chinese only.
+- The GPUI-drawn UI has limited VoiceOver / accessibility support (GPUI doesn't expose a full accessibility tree yet).
+- The app is not notarized, and the master key lives in the data directory rather than the Keychain.
 
 ## Contributing
 
 Issues and PRs are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md). Release notes: [CHANGELOG.md](CHANGELOG.md).
+
+## Docs
+
+- [Provider quirks](PROVIDER_QUIRKS.md) (Chinese)
+- [vendor/gpui patches](vendor/PATCHES.md)
 
 ## License
 

@@ -17,11 +17,16 @@ pub struct FolderRef {
 
 /// 写入信封；返回真正新增的封数（认领占位不算新增）
 pub fn insert_envelopes(store: &Store, f: &FolderRef, items: &[HeaderItem]) -> Result<usize> {
+    Ok(insert_envelopes_ids(store, f, items)?.len())
+}
+
+/// 同 [`insert_envelopes`]，返回新增行的 id（规则引擎要用）
+pub fn insert_envelopes_ids(store: &Store, f: &FolderRef, items: &[HeaderItem]) -> Result<Vec<i64>> {
     if items.is_empty() {
-        return Ok(0);
+        return Ok(vec![]);
     }
     store.tx(|tx| {
-        let mut n = 0;
+        let mut ids = Vec::new();
         for m in items {
             let e = &m.env;
             if claim_placeholder(tx, f.id, m.uid, &e.message_id, &m.flags)? {
@@ -30,8 +35,8 @@ pub fn insert_envelopes(store: &Store, f: &FolderRef, items: &[HeaderItem]) -> R
             let date = e.date.or(m.internal_date).unwrap_or_else(now_ms);
             let changed = tx.execute(
                 "INSERT INTO messages (account_id, folder_id, uid, message_id, in_reply_to, refs, subject, from_name, from_addr, to_json, cc_json, reply_to,
-                   date, size, seen, flagged, answered, draft, has_att)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(folder_id, uid) DO NOTHING",
+                   date, size, seen, flagged, answered, draft, has_att, thread, unsub, unsub_post, auth_res)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(folder_id, uid) DO NOTHING",
                 params![
                     f.account_id,
                     f.id,
@@ -51,17 +56,28 @@ pub fn insert_envelopes(store: &Store, f: &FolderRef, items: &[HeaderItem]) -> R
                     m.flags.flagged as i64,
                     m.flags.answered as i64,
                     m.flags.draft as i64,
-                    e.maybe_att as i64
+                    e.maybe_att as i64,
+                    e.thread_key(),
+                    e.unsub,
+                    e.unsub_post as i64,
+                    e.auth_res
                 ],
             )?;
             if changed > 0 {
-                n += 1;
                 let id = tx.last_insert_rowid();
+                fix_thread(tx, id)?;
+                ids.push(id);
                 Store::fts_upsert(tx, id, &e.subject, &parse::people_text(&e.from, &e.to, &e.cc), "")?;
             }
         }
-        Ok(n)
+        Ok(ids)
     })
+}
+
+/// 没有任何 Message-ID 的信自成一个会话
+pub fn fix_thread(c: &Connection, id: i64) -> Result<()> {
+    c.execute("UPDATE messages SET thread = 'id:' || id WHERE id = ? AND thread = ''", [id])?;
+    Ok(())
 }
 
 fn claim_placeholder(c: &Connection, folder_id: i64, uid: u32, message_id: &str, flags: &Flags) -> Result<bool> {
@@ -92,7 +108,7 @@ pub fn drop_stale_placeholders(store: &Store, folder_id: i64, keep: &std::collec
 }
 
 pub fn ids_with_account(store: &Store, sql: &str, p: impl rusqlite::Params) -> Result<Vec<(i64, i64)>> {
-    let c = store.w();
+    let c = store.r();
     let mut st = c.prepare(sql)?;
     let v = st.query_map(p, |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<Vec<_>, _>>()?;
     Ok(v)
@@ -147,10 +163,13 @@ pub fn sweep_orphan_eml(store: &Store) -> Result<usize> {
     Ok(n)
 }
 
-/// 原文落盘 + 解析结果入库 + 全文索引
+/// 原文落盘 + 解析结果入库 + 全文索引。
+///
+/// HTML 不再写进库（显示时从 .eml 现解析，见 `queries::detail`）：同一封正文以前在磁盘上存了 .eml、text、html、
+/// 两份索引共四五份，html 往往是其中最大的一份。text 仍然保留：全文索引回填、摘要、回复引用都要用。
 pub fn store_body(store: &Store, msg_id: i64, raw: &[u8]) -> Result<Parsed> {
     let (acc_id, subject, from_name, from_addr): (i64, String, String, String) =
-        store.w().query_row("SELECT account_id, subject, from_name, from_addr FROM messages WHERE id = ?", [msg_id], |r| {
+        store.r().query_row("SELECT account_id, subject, from_name, from_addr FROM messages WHERE id = ?", [msg_id], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })?;
     let parsed = match parse::parse_full(raw) {
@@ -167,18 +186,25 @@ pub fn store_body(store: &Store, msg_id: i64, raw: &[u8]) -> Result<Parsed> {
     std::fs::write(&file, raw)?;
     let subject = if subject.is_empty() { parsed.env.subject.clone() } else { subject };
     let from = Addr { name: from_name, address: from_addr };
+    let (hosts, pixels) = parse::remote_trackers(&parsed.html);
+    let trackers = if hosts.is_empty() { String::new() } else { format!("{pixels}|{}", hosts.join(",")) };
     let c = store.w();
     c.execute(
-        "UPDATE messages SET body_state = 1, text = ?, html = ?, att_json = ?, snippet = ?, eml_path = ?, has_att = ?, to_json = ?, cc_json = ? WHERE id = ?",
+        "UPDATE messages SET body_state = 1, text = ?, html = '', att_json = ?, snippet = ?, eml_path = ?, has_att = ?, to_json = ?, cc_json = ?, trackers = ?,
+           unsub = CASE WHEN unsub = '' THEN ? ELSE unsub END, unsub_post = MAX(unsub_post, ?),
+           auth_res = CASE WHEN auth_res = '' THEN ? ELSE auth_res END WHERE id = ?",
         params![
             parsed.text,
-            parsed.html,
             serde_json::to_string(&parsed.atts)?,
             parsed.snippet,
             Store::eml_rel(acc_id, msg_id),
             (parsed.files > 0) as i64,
             serde_json::to_string(&parsed.env.to)?,
             serde_json::to_string(&parsed.env.cc)?,
+            trackers,
+            parsed.env.unsub,
+            parsed.env.unsub_post as i64,
+            parsed.env.auth_res,
             msg_id
         ],
     )?;
@@ -226,8 +252,8 @@ pub fn move_local_in(tx: &Connection, ids: &[i64], src_folder: i64, dest_folder:
                 unseen += 1;
             }
         }
-        tx.execute("UPDATE folders SET total = MAX(0, total - ?), unseen = MAX(0, unseen - ?) WHERE id = ?", params![moved, unseen, src_folder])?;
-        tx.execute("UPDATE folders SET total = total + ?, unseen = unseen + ? WHERE id = ?", params![moved, unseen, dest_folder])?;
+        tx.execute("UPDATE folders SET total = MAX(0, total - ?), unseen = MAX(0, unseen - ?) WHERE id = ?", params![moved as i64, unseen as i64, src_folder])?;
+        tx.execute("UPDATE folders SET total = total + ?, unseen = unseen + ? WHERE id = ?", params![moved as i64, unseen as i64, dest_folder])?;
         Ok((moved, unseen))
     }
 }

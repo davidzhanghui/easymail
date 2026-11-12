@@ -1,4 +1,4 @@
-//! 账号与设置。对应 just-mail 的 AccountsModal.jsx：账号列表（同步 / 暂停 / 编辑 / 移除）、
+//! 账号与设置：账号列表（同步 / 暂停 / 编辑 / 移除）、
 //! 添加 / 编辑表单（服务商预设、帮助步骤、连接测试）、同步与网络设置。
 
 use super::fmt_ago;
@@ -190,6 +190,113 @@ impl AccountsModal {
         })
     }
 
+    /// OAuth2 登录（Outlook / Microsoft 365；Gmail 需在「更多设置」填自己的 Google Client ID）：
+    /// 打开浏览器授权，回调到本机临时端口，拿到 refresh token 后直接保存账号。
+    fn oauth_login(&mut self, cx: &mut Context<Self>) {
+        let Some(inp) = self.input_of(cx) else { return };
+        let Some(kind) = crate::core::oauth::Kind::for_provider(&inp.provider) else { return };
+        let store = self.eng.store().clone();
+        let (client_id, secret) = match crate::core::oauth::client_for(&store, kind) {
+            Ok(c) => c,
+            Err(e) => {
+                self.result = Some(TestResult { imap: Err(String::new()), smtp: Err(String::new()), error: Some(e.to_string()) });
+                cx.notify();
+                return;
+            }
+        };
+        self.busy = Some("oauth");
+        self.result = None;
+        cx.notify();
+        let proxy = if inp.use_proxy.unwrap_or(false) { self.eng.proxy() } else { None };
+        let hint = inp.email.trim().to_string();
+        let fut = self.eng.call(async move {
+            crate::core::oauth::login(kind, &client_id, &secret, &hint, proxy.as_ref(), |url| {
+                let _ = std::process::Command::new("open").arg(url).status();
+            })
+            .await
+        });
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let r = fut.await;
+            this.update(cx, |m, cx| {
+                m.busy = None;
+                let res = r.and_then(|tok| {
+                    let mut inp = inp.clone();
+                    if inp.email.trim().is_empty() {
+                        inp.email = tok.email.clone();
+                    }
+                    let d = accounts::draft(&inp, None)?;
+                    let acc = accounts::save_oauth(&store, &d, &tok)?;
+                    if !inp.name.trim().is_empty() || !inp.signature.is_empty() {
+                        let patch = AccountPatch {
+                            name: Some(inp.name.trim().to_string()),
+                            signature: Some(inp.signature.clone()),
+                            use_proxy: inp.use_proxy,
+                            sync_enabled: None,
+                            password: None,
+                        };
+                        let _ = accounts::update(&store, acc.id, &patch);
+                    }
+                    Ok(acc)
+                });
+                match res {
+                    Ok(acc) => {
+                        m.eng.restart_account(acc.id);
+                        m.eng.request_sync(acc.id, None, true);
+                        cx.emit(AccountsEvent::Toast(format!("已通过 OAuth 登录 {}，正在后台同步…", acc.email), false));
+                        cx.emit(AccountsEvent::Changed);
+                        m.editing = Editing::None;
+                        m.form = None;
+                        m.reload();
+                    }
+                    Err(e) => {
+                        m.result = Some(TestResult { imap: Err(String::new()), smtp: Err(String::new()), error: Some(format!("OAuth 登录失败：{e:#}")) })
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 自定义服务商：按邮箱域名查自动配置（域名自己的 autoconfig → Thunderbird 公共库）
+    fn autoconfig(&mut self, cx: &mut Context<Self>) {
+        let Some(f) = self.form.as_ref() else { return };
+        let email = f.email.read(cx).text();
+        let proxy = if f.use_proxy { self.eng.proxy() } else { None };
+        self.busy = Some("auto");
+        self.result = None;
+        cx.notify();
+        let fut = self.eng.call(async move { providers::autoconfig(&email, proxy.as_ref()).await });
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let r = fut.await;
+            this.update(cx, |m, cx| {
+                m.busy = None;
+                match r {
+                    Ok(ac) => {
+                        if let Some(f) = m.form.as_ref() {
+                            let sv = ac.server.clone();
+                            f.imap_host.update(cx, |i, cx| i.set_text(&sv.imap_host, cx));
+                            f.imap_port.update(cx, |i, cx| i.set_text(&sv.imap_port.to_string(), cx));
+                            f.smtp_host.update(cx, |i, cx| i.set_text(&sv.smtp_host, cx));
+                            f.smtp_port.update(cx, |i, cx| i.set_text(&sv.smtp_port.to_string(), cx));
+                        }
+                        cx.emit(AccountsEvent::Toast(format!("已从{}填好服务器地址", ac.source), false));
+                    }
+                    Err(e) => {
+                        m.result =
+                            Some(TestResult {
+                                imap: Err(String::new()), smtp: Err(String::new()), error: Some(format!("没找到自动配置：{e:#}，请手动填写"))
+                            })
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn existing(&self) -> Option<Account> {
         match self.editing {
             Editing::Edit(id) => self.accounts.iter().find(|a| a.id == id).cloned(),
@@ -220,7 +327,7 @@ impl AccountsModal {
                 }
             }
         } else {
-            accounts::clean_password(&inp.password)
+            accounts::clean_password(&acc.provider, &inp.password)
         };
         // 编辑时只改了名称 / 签名：不必重新测试
         if save && existing.is_some() && inp.password.trim().is_empty() && existing.as_ref().is_some_and(|e| e.use_proxy == acc.use_proxy) {
@@ -429,7 +536,50 @@ impl AccountsModal {
             )),
         ));
         d = d.child(form_row(t, "显示名称", false).child(self.field(t, &f.name, window, cx)));
+        let oauth_kind = crate::core::oauth::Kind::for_provider(&f.provider);
+        if let (Some(kind), None) = (oauth_kind, &editing) {
+            let busy = self.busy == Some("oauth");
+            let label = match kind {
+                crate::core::oauth::Kind::Microsoft => "用 Microsoft 账号登录（推荐）",
+                crate::core::oauth::Kind::Google => "用 Google 账号登录（OAuth）",
+            };
+            d = d.child(
+                form_row(t, "OAuth", false)
+                    .child(
+                        disabled(
+                            button("acc-oauth", t, Kind::Primary, Some("shield"), if busy { "等待浏览器授权…" } else { label }, false),
+                            self.busy.is_some(),
+                        )
+                        .on_click(cx.listener(|m, _, _, cx| {
+                            if m.busy.is_none() {
+                                m.oauth_login(cx)
+                            }
+                        })),
+                    )
+                    .child(div().text_size(px(11.5)).text_color(t.muted).child("在浏览器里授权，不需要授权码；下面的密码可以不填")),
+            );
+        }
         if f.provider == "custom" && editing.is_none() {
+            d = d.child(
+                form_row(t, "自动配置", false).child(
+                    disabled(
+                        button(
+                            "acc-auto",
+                            t,
+                            Kind::Secondary,
+                            Some("search"),
+                            if self.busy == Some("auto") { "查找中…" } else { "按邮箱自动查找服务器" },
+                            true,
+                        ),
+                        self.busy.is_some(),
+                    )
+                    .on_click(cx.listener(|m, _, _, cx| {
+                        if m.busy.is_none() {
+                            m.autoconfig(cx)
+                        }
+                    })),
+                ),
+            );
             d = d
                 .child(
                     form_row(t, "IMAP 服务器", false)

@@ -9,7 +9,7 @@
 //! 本地归档的邮件只改本地库。
 
 use super::db::Store;
-use super::engine::{Engine, Evt};
+use super::engine::{Engine, Evt, LastUndo};
 use super::messages;
 use super::pending::{self, Outcome, Task, Undo};
 use anyhow::{bail, Result};
@@ -121,6 +121,44 @@ async fn submit(eng: &Engine, account_id: i64, op_ids: Vec<i64>, what: &str) -> 
         eng.toast(format!("{what}暂时没能同步到服务器，已保存在本地，联网后会自动重试（{m}）"), true);
     }
     Ok(())
+}
+
+/// 撤销窗口版的提交：先不送服务器，窗口结束后再 Flush；窗口内可以 [`undo_last`]
+fn submit_delayed(eng: &Engine, account_id: i64, op_ids: Vec<i64>, what: &'static str, then_sync: Option<i64>) {
+    if op_ids.is_empty() {
+        return;
+    }
+    let e = eng.clone();
+    eng.spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(pending::undo_window() as u64 + 200)).await;
+        let live: Vec<i64> = op_ids.into_iter().filter(|id| pending::untouched(e.store(), *id)).collect();
+        if live.is_empty() {
+            return;
+        }
+        if let Err(err) = submit(&e, account_id, live, what).await {
+            e.toast(format!("{err:#}"), true);
+        }
+        if let Some(f) = then_sync {
+            e.request_sync(account_id, Some(f), false);
+        }
+    });
+}
+
+/// 撤销最近一次移动 / 删除（撤销窗口内有效）。返回撤销的待办条数；0 表示已经送达服务器、来不及了
+pub async fn undo_last(eng: Engine) -> Result<(String, usize)> {
+    let Some(u) = eng.take_last_undo() else { bail!("没有可以撤销的操作") };
+    let mut by_acc: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+    for (acc, id) in &u.ops {
+        by_acc.entry(*acc).or_default().push(*id);
+    }
+    let mut n = 0;
+    for (acc, ids) in by_acc {
+        n += eng.undo(acc, ids).await?;
+    }
+    if n == 0 {
+        bail!("「{}」已经同步到服务器，无法撤销", u.label);
+    }
+    Ok((u.label, n))
 }
 
 async fn submit_all(eng: &Engine, by_acc: BTreeMap<i64, Vec<i64>>, what: &str) -> Result<()> {
@@ -239,8 +277,7 @@ fn dest(store: &Store, id: i64) -> Result<Dest> {
         .ok_or_else(|| anyhow::anyhow!("目标文件夹不存在"))
 }
 
-/// 返回移动的封数
-pub async fn move_messages(eng: Engine, ids: Vec<i64>, dest_id: i64) -> Result<usize> {
+async fn move_messages_as(eng: Engine, ids: Vec<i64>, dest_id: i64, label: &str) -> Result<usize> {
     let store = eng.store().clone();
     let d = dest(&store, dest_id)?;
     let gs = groups(&store, &ids)?;
@@ -265,7 +302,9 @@ pub async fn move_messages(eng: Engine, ids: Vec<i64>, dest_id: i64) -> Result<u
             };
             let op = if g.needs_remote() {
                 let items = g.remote_rows().map(|r| (r.uid as u32, r.message_id.clone())).collect();
-                Some(pending::enqueue(tx, g.account_id, &Task::Move { path: g.path.clone(), items, dest: d.path.clone() }, &undo)?)
+                let task = Task::Move { path: g.path.clone(), items, dest: d.path.clone() };
+                let nb = if pending::undo_window() > 0 { super::db::now_ms() + pending::undo_window() } else { 0 };
+                Some(pending::enqueue_at(tx, g.account_id, &task, &undo, nb)?)
             } else {
                 None
             };
@@ -279,12 +318,24 @@ pub async fn move_messages(eng: Engine, ids: Vec<i64>, dest_id: i64) -> Result<u
         folder_changed(&eng, g);
     }
     eng.emit(Evt::Folder { account_id: d.account_id, folder_id: d.id, added: 0 });
-    let any_remote = !op_ids.is_empty();
-    submit(&eng, d.account_id, op_ids, "移动").await?;
-    if any_remote && d.sync_enabled {
-        eng.request_sync(d.account_id, Some(d.id), false);
+    if !op_ids.is_empty() {
+        eng.set_last_undo(Some(LastUndo { label: label.to_string(), ops: op_ids.iter().map(|i| (d.account_id, *i)).collect(), at: super::db::now_ms() }));
+    }
+    if pending::undo_window() > 0 {
+        submit_delayed(&eng, d.account_id, op_ids, "移动", d.sync_enabled.then_some(d.id));
+    } else {
+        let any_remote = !op_ids.is_empty();
+        submit(&eng, d.account_id, op_ids, "移动").await?;
+        if any_remote && d.sync_enabled {
+            eng.request_sync(d.account_id, Some(d.id), false);
+        }
     }
     Ok(moved)
+}
+
+/// 返回移动的封数（「移动」/「删除」/「归档」等共用，`label` 是撤销提示里的名字）
+pub async fn move_messages(eng: Engine, ids: Vec<i64>, dest_id: i64) -> Result<usize> {
+    move_messages_as(eng, ids, dest_id, "移动").await
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -301,14 +352,17 @@ pub async fn delete_messages(eng: Engine, ids: Vec<i64>) -> Result<DeleteResult>
         let trash: Option<i64> =
             store.r().query_row("SELECT id FROM folders WHERE account_id = ? AND role = 'trash'", [g.account_id], |r| r.get(0)).optional()?;
         if let Some(t) = trash.filter(|_| g.role != "trash" && g.role != "junk") {
-            res.trashed += move_messages(eng.clone(), g.ids(), t).await?;
+            res.trashed += move_messages_as(eng.clone(), g.ids(), t, "删除").await?;
             continue;
         }
         let rows = g.id_accounts();
         let unseen = g.rows.iter().filter(|r| !r.seen).count();
         let op = store.tx(|tx| {
             messages::delete_rows_in(tx, &rows)?;
-            tx.execute("UPDATE folders SET total = MAX(0, total - ?), unseen = MAX(0, unseen - ?) WHERE id = ?", params![rows.len(), unseen, g.folder_id])?;
+            tx.execute(
+                "UPDATE folders SET total = MAX(0, total - ?), unseen = MAX(0, unseen - ?) WHERE id = ?",
+                params![rows.len() as i64, unseen as i64, g.folder_id],
+            )?;
             if !g.needs_remote() {
                 return Ok(None);
             }
@@ -335,7 +389,13 @@ pub async fn move_to_role(eng: Engine, ids: Vec<i64>, role: &str) -> Result<usiz
     let d: Option<i64> =
         store.r().query_row("SELECT id FROM folders WHERE account_id = ? AND role = ?", params![g.account_id, role], |r| r.get(0)).optional()?;
     let Some(d) = d else { bail!("这个账号没有对应的文件夹") };
-    move_messages(eng, ids, d).await
+    let label = match role {
+        "junk" => "标为垃圾邮件",
+        "archive" => "归档",
+        "inbox" => "移回收件箱",
+        _ => "移动",
+    };
+    move_messages_as(eng, ids, d, label).await
 }
 
 // ---------------- 文件夹管理（只对本地归档开放；邮箱文件夹在服务器上管理） ----------------
@@ -348,32 +408,119 @@ fn is_local_account(store: &Store, acc_id: i64) -> Result<bool> {
     }
 }
 
-pub fn create_folder(store: &Store, acc_id: i64, name: &str, parent: Option<i64>) -> Result<i64> {
-    let clean = name.trim();
+/// 新文件夹的完整路径与分隔符（远端账号用服务器的层级分隔符）
+fn new_folder_path(store: &Store, acc_id: i64, name: &str, parent: Option<i64>) -> Result<(String, String, String)> {
+    let clean = name.trim().to_string();
     if clean.is_empty() {
         bail!("文件夹名称不能为空");
     }
-    if clean.contains('/') {
-        bail!("文件夹名称不能包含 /");
-    }
-    if !is_local_account(store, acc_id)? {
-        bail!("邮箱文件夹只读：请在邮箱客户端或网页端新建文件夹");
-    }
-    let full = match parent {
+    let (full, delim) = match parent {
         Some(pid) => {
             let (p, d): (String, String) = store.r().query_row("SELECT path, delimiter FROM folders WHERE id = ?", [pid], |r| Ok((r.get(0)?, r.get(1)?)))?;
-            format!("{p}{d}{clean}")
+            (format!("{p}{d}{clean}"), d)
         }
-        None => clean.to_string(),
+        None => {
+            let d: Option<String> = store
+                .r()
+                .query_row("SELECT delimiter FROM folders WHERE account_id = ? AND delimiter != '' ORDER BY id LIMIT 1", [acc_id], |r| r.get(0))
+                .optional()?;
+            (clean.clone(), d.unwrap_or_else(|| "/".into()))
+        }
     };
+    if clean.contains('/') || (!delim.is_empty() && clean.contains(delim.as_str())) {
+        bail!("文件夹名称不能包含 {}", if delim.is_empty() { "/" } else { delim.as_str() });
+    }
     let exists: Option<i64> =
         store.r().query_row("SELECT id FROM folders WHERE account_id = ? AND path = ?", params![acc_id, full], |r| r.get(0)).optional()?;
     if exists.is_some() {
         bail!("同名文件夹已存在");
     }
+    Ok((full, clean, delim))
+}
+
+fn insert_folder(store: &Store, acc_id: i64, full: &str, name: &str, delim: &str) -> Result<i64> {
     let c = store.w();
-    c.execute("INSERT INTO folders (account_id, path, name, delimiter, role, sync_enabled) VALUES (?,?,?,'/','',1)", params![acc_id, full, clean])?;
+    c.execute("INSERT INTO folders (account_id, path, name, delimiter, role, sync_enabled) VALUES (?,?,?,?,'',1)", params![acc_id, full, name, delim])?;
     Ok(c.last_insert_rowid())
+}
+
+pub fn create_folder(store: &Store, acc_id: i64, name: &str, parent: Option<i64>) -> Result<i64> {
+    if !is_local_account(store, acc_id)? {
+        bail!("邮箱账号的文件夹请用 create_folder_remote（需要连服务器）");
+    }
+    let (full, clean, _) = new_folder_path(store, acc_id, name, parent)?;
+    insert_folder(store, acc_id, &full, &clean, "/")
+}
+
+/// 邮箱账号的文件夹管理直接连服务器执行（结构性操作，不进 pending_ops：失败就整体失败，不做乐观更新）
+async fn remote_session(eng: &Engine, acc_id: i64) -> Result<super::imap::Imap> {
+    let Some(acc) = super::accounts::get(eng.store(), acc_id)? else { bail!("账号不存在") };
+    let proxy = eng.proxy();
+    let pw = super::accounts::credential(eng.store(), &acc, proxy.as_ref()).await?;
+    super::imap::Imap::connect(&acc, &pw, proxy.as_ref()).await
+}
+
+/// 本地归档直接改库；邮箱账号先在服务器上建，成功后再写本地
+pub async fn create_folder_any(eng: Engine, acc_id: i64, name: String, parent: Option<i64>) -> Result<i64> {
+    let store = eng.store().clone();
+    if is_local_account(&store, acc_id)? {
+        return create_folder(&store, acc_id, &name, parent);
+    }
+    let (full, clean, delim) = new_folder_path(&store, acc_id, &name, parent)?;
+    let mut c = remote_session(&eng, acc_id).await?;
+    let r = c.create_folder(&full).await;
+    c.logout().await;
+    r?;
+    insert_folder(&store, acc_id, &full, &clean, &delim)
+}
+
+pub async fn rename_folder_any(eng: Engine, folder_id: i64, name: String) -> Result<()> {
+    let store = eng.store().clone();
+    let (acc, path, delim, role): (i64, String, String, String) = store
+        .r()
+        .query_row("SELECT account_id, path, delimiter, role FROM folders WHERE id = ?", [folder_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .optional()?
+        .ok_or_else(|| anyhow::anyhow!("文件夹不存在"))?;
+    if is_local_account(&store, acc)? {
+        return rename_folder(&store, folder_id, &name);
+    }
+    let clean = name.trim();
+    if clean.is_empty() || clean.contains('/') || (!delim.is_empty() && clean.contains(delim.as_str())) {
+        bail!("文件夹名称不能为空，也不能包含分隔符");
+    }
+    if !role.is_empty() || path.eq_ignore_ascii_case("INBOX") {
+        bail!("系统文件夹不能改名");
+    }
+    let mut parts: Vec<&str> = if delim.is_empty() { vec![path.as_str()] } else { path.split(delim.as_str()).collect() };
+    if let Some(l) = parts.last_mut() {
+        *l = clean;
+    }
+    let next = parts.join(&delim);
+    let mut c = remote_session(&eng, acc).await?;
+    let r = c.rename_folder(&path, &next).await;
+    c.logout().await;
+    r?;
+    rename_local_paths(&store, acc, folder_id, &path, &next, clean, &delim)
+}
+
+pub async fn delete_folder_any(eng: Engine, folder_id: i64) -> Result<()> {
+    let store = eng.store().clone();
+    let (acc, role, path): (i64, String, String) = store
+        .r()
+        .query_row("SELECT account_id, role, path FROM folders WHERE id = ?", [folder_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .optional()?
+        .ok_or_else(|| anyhow::anyhow!("文件夹不存在"))?;
+    if is_local_account(&store, acc)? {
+        return delete_folder(&store, folder_id);
+    }
+    if !role.is_empty() || path.eq_ignore_ascii_case("INBOX") {
+        bail!("系统文件夹不能删除");
+    }
+    let mut c = remote_session(&eng, acc).await?;
+    let r = c.delete_folder(&path).await;
+    c.logout().await;
+    r?;
+    delete_local_tree(&store, acc, folder_id)
 }
 
 pub fn rename_folder(store: &Store, folder_id: i64, name: &str) -> Result<()> {
@@ -390,16 +537,23 @@ pub fn rename_folder(store: &Store, folder_id: i64, name: &str) -> Result<()> {
         bail!("系统文件夹不能改名");
     }
     if !is_local_account(store, acc)? {
-        bail!("邮箱文件夹只读：请在邮箱客户端或网页端改名");
+        bail!("邮箱账号的文件夹请用 rename_folder_any（需要连服务器）");
     }
     let mut parts: Vec<&str> = path.split(delim.as_str()).collect();
     if let Some(l) = parts.last_mut() {
         *l = clean;
     }
     let next = parts.join(&delim);
+    rename_local_paths(store, acc, folder_id, &path, &next, clean, &delim)
+}
+
+fn rename_local_paths(store: &Store, acc: i64, folder_id: i64, path: &str, next: &str, clean: &str, delim: &str) -> Result<()> {
     store.tx(|tx| {
         tx.execute("UPDATE folders SET path = ?, name = ? WHERE id = ?", params![next, clean, folder_id])?;
         // 子文件夹的 path 前缀一起改，否则层级会断
+        if delim.is_empty() {
+            return Ok(()); // 平铺命名空间（无分隔符）：没有子文件夹
+        }
         let prefix = format!("{path}{delim}");
         let children: Vec<(i64, String)> = {
             let mut st = tx.prepare("SELECT id, path FROM folders WHERE account_id = ? AND substr(path, 1, ?) = ?")?;
@@ -423,10 +577,19 @@ pub fn delete_folder(store: &Store, folder_id: i64) -> Result<()> {
         bail!("系统文件夹不能删除");
     }
     if !is_local_account(store, acc)? {
-        bail!("邮箱文件夹只读：请在邮箱客户端或网页端删除");
+        bail!("邮箱账号的文件夹请用 delete_folder_any（需要连服务器）");
     }
-    let prefix = format!("{path}{delim}");
-    let targets: Vec<i64> = {
+    let _ = (path, delim);
+    delete_local_tree(store, acc, folder_id)
+}
+
+fn delete_local_tree(store: &Store, acc: i64, folder_id: i64) -> Result<()> {
+    let (path, delim): (String, String) =
+        store.r().query_row("SELECT path, delimiter FROM folders WHERE id = ?", [folder_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let targets: Vec<i64> = if delim.is_empty() {
+        vec![folder_id] // 平铺命名空间：只删自己，别把同前缀的兄弟文件夹也删了
+    } else {
+        let prefix = format!("{path}{delim}");
         let c = store.r();
         let mut st = c.prepare("SELECT id FROM folders WHERE account_id = ? AND (id = ? OR substr(path, 1, ?) = ?)")?;
         let v = st.query_map(params![acc, folder_id, prefix.chars().count() as i64, prefix], |r| r.get(0))?.collect::<Result<Vec<i64>, _>>()?;

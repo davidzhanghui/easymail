@@ -191,21 +191,57 @@ pub fn unread() -> i64 {
     UNREAD.load(Ordering::Relaxed)
 }
 
-/// 系统通知。打包成 .app 时走 NSUserNotificationCenter，直接 cargo run 时退回 osascript。
+/// 通知授权状态：0 未知（请求中）、1 允许、2 拒绝 / 不可用
+static UN_AUTH: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn bundled() -> bool {
+    objc2_foundation::NSBundle::mainBundle().bundleIdentifier().is_some()
+}
+
+/// 启动时申请通知权限（UNUserNotificationCenter 必须在 .app 里，直接 cargo run 时没有 bundle 会崩，所以只在打包后调用）
+pub fn init_notifications() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    if !bundled() || std::env::var_os("EASYMAIL_NO_NOTIFY").is_some() {
+        return;
+    }
+    ONCE.call_once(|| {
+        use objc2_user_notifications::{UNAuthorizationOptions, UNUserNotificationCenter};
+        let center = UNUserNotificationCenter::currentNotificationCenter();
+        let done = block2::RcBlock::new(|granted: objc2::runtime::Bool, _err: *mut objc2_foundation::NSError| {
+            UN_AUTH.store(if granted.as_bool() { 1 } else { 2 }, std::sync::atomic::Ordering::SeqCst);
+            log::info!("[notify] 通知权限：{}", if granted.as_bool() { "允许" } else { "拒绝" });
+        });
+        center.requestAuthorizationWithOptions_completionHandler(
+            UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound | UNAuthorizationOptions::Badge,
+            &done,
+        );
+    });
+}
+
+/// 系统通知。打包成 .app 时走 UNUserNotificationCenter（用户在「系统设置 → 通知」里能管理），
+/// 直接 cargo run（没有 bundle）时退回 osascript。
 pub fn notify(title: &str, body: &str) {
     if std::env::var_os("EASYMAIL_NO_NOTIFY").is_some() {
         return;
     }
-    let bundled = objc2_foundation::NSBundle::mainBundle().bundleIdentifier().is_some();
-    if bundled {
-        #[allow(deprecated)]
-        {
-            use objc2_foundation::{NSUserNotification, NSUserNotificationCenter};
-            let n = NSUserNotification::new();
-            n.setTitle(Some(&NSString::from_str(title)));
-            n.setInformativeText(Some(&NSString::from_str(body)));
-            NSUserNotificationCenter::defaultUserNotificationCenter().deliverNotification(&n);
+    if bundled() {
+        init_notifications();
+        if UN_AUTH.load(std::sync::atomic::Ordering::SeqCst) == 2 {
+            return; // 用户关掉了通知：尊重系统设置，不再绕道 osascript
         }
+        use objc2_user_notifications::{UNMutableNotificationContent, UNNotificationRequest, UNNotificationSound, UNUserNotificationCenter};
+        let content = UNMutableNotificationContent::new();
+        content.setTitle(&NSString::from_str(title));
+        content.setBody(&NSString::from_str(body));
+        content.setSound(Some(&UNNotificationSound::defaultSound()));
+        let id = NSString::from_str(&uuid::Uuid::new_v4().to_string());
+        let req = UNNotificationRequest::requestWithIdentifier_content_trigger(&id, &content, None);
+        let done = block2::RcBlock::new(|err: *mut objc2_foundation::NSError| {
+            if !err.is_null() {
+                log::warn!("[notify] 投递通知失败");
+            }
+        });
+        UNUserNotificationCenter::currentNotificationCenter().addNotificationRequest_withCompletionHandler(&req, Some(&done));
     } else {
         let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
         let script = format!("display notification \"{}\" with title \"{}\"", esc(body), esc(title));

@@ -101,6 +101,15 @@ pub struct Pending {
     pub undo: Undo,
     pub attempts: i64,
     pub created_at: i64,
+    /// 这个时间点（毫秒）之前不送达服务器：撤销窗口
+    pub not_before: i64,
+}
+
+/// 移动 / 删除到垃圾箱后的撤销窗口（毫秒）。端到端测试设为 0：立即送达服务器并等结果
+pub static UNDO_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(6_000);
+
+pub fn undo_window() -> i64 {
+    UNDO_MS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// 一条待办的执行结果
@@ -115,25 +124,35 @@ pub enum Outcome {
 
 /// 写入一条待办；必须和对应的本地改动在**同一个事务**里调用
 pub fn enqueue(c: &Connection, account_id: i64, task: &Task, undo: &Undo) -> Result<i64> {
+    enqueue_at(c, account_id, task, undo, 0)
+}
+
+/// 同 [`enqueue`]，但 `not_before` 之前 worker 不会执行（撤销窗口）
+pub fn enqueue_at(c: &Connection, account_id: i64, task: &Task, undo: &Undo, not_before: i64) -> Result<i64> {
     c.execute(
-        "INSERT INTO pending_ops (account_id, kind, payload, undo, created_at) VALUES (?,?,?,?,?)",
-        params![account_id, task.kind(), serde_json::to_string(task)?, serde_json::to_string(undo)?, now_ms()],
+        "INSERT INTO pending_ops (account_id, kind, payload, undo, created_at, not_before) VALUES (?,?,?,?,?,?)",
+        params![account_id, task.kind(), serde_json::to_string(task)?, serde_json::to_string(undo)?, now_ms(), not_before],
     )?;
     Ok(c.last_insert_rowid())
 }
 
+/// 还没开始执行（可撤销）的待办
+pub fn untouched(store: &Store, id: i64) -> bool {
+    store.r().query_row("SELECT attempts FROM pending_ops WHERE id = ?", [id], |r| r.get::<_, i64>(0)).is_ok_and(|a| a == 0)
+}
+
 /// 某个账号的全部待办，按写入顺序。解析不了的条目（理论上不会有）记日志后丢弃，不卡住后面的。
 pub fn list(store: &Store, account_id: i64) -> Result<Vec<Pending>> {
-    let rows: Vec<(i64, String, String, i64, i64)> = {
-        let c = store.w();
-        let mut st = c.prepare("SELECT id, payload, undo, attempts, created_at FROM pending_ops WHERE account_id = ? ORDER BY id")?;
-        let v = st.query_map([account_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?.collect::<Result<Vec<_>, _>>()?;
+    let rows: Vec<(i64, String, String, i64, i64, i64)> = {
+        let c = store.r();
+        let mut st = c.prepare("SELECT id, payload, undo, attempts, created_at, not_before FROM pending_ops WHERE account_id = ? ORDER BY id")?;
+        let v = st.query_map([account_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?.collect::<Result<Vec<_>, _>>()?;
         v
     };
     let mut out = Vec::with_capacity(rows.len());
-    for (id, payload, undo, attempts, created_at) in rows {
+    for (id, payload, undo, attempts, created_at, not_before) in rows {
         match serde_json::from_str::<Task>(&payload) {
-            Ok(task) => out.push(Pending { id, account_id, task, undo: serde_json::from_str(&undo).unwrap_or_default(), attempts, created_at }),
+            Ok(task) => out.push(Pending { id, account_id, task, undo: serde_json::from_str(&undo).unwrap_or_default(), attempts, created_at, not_before }),
             Err(e) => {
                 log::warn!("[pending] 丢弃无法解析的待办 {id}：{e}");
                 done(store, id)?;

@@ -1,0 +1,41 @@
+[package]
+name = "easymail-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+easymail = { path = ".." }
+
+# 独立工作区：不进主包的构建 / 测试
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "parse_message"
+path = "fuzz_targets/parse_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "html_and_links"
+path = "fuzz_targets/html_and_links.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "search_query"
+path = "fuzz_targets/search_query.rs"
+test = false
+doc = false
+bench = false
+
+# 与主包一致：用仓库里打过补丁的 GPUI
+[patch.crates-io]
+gpui = { path = "../vendor/gpui" }
