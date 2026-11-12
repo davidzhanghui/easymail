@@ -9,3 +9,5 @@
 .idea/
 .vscode/
 *.log
+.wrangler/
+.dev.vars

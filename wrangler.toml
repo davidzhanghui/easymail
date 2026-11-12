@@ -1,0 +1,7 @@
+# 官网静态站：把 docs/ 部署到 Cloudflare Workers Assets
+# 仪表盘 Path 填 /（仓库根），Build 留空，Deploy: npx wrangler deploy
+name = "easymail"
+compatibility_date = "2026-11-12"
+
+[assets]
+directory = "./docs"
