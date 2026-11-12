@@ -38,7 +38,7 @@ impl MailApp {
                     (Cmd::Backup, "download", "完整备份"),
                     (Cmd::Slim, "trash", "安全瘦身"),
                     (Cmd::ToggleThreads, "list", if self.threads { "改为逐封显示" } else { "按会话合并显示" }),
-                    (Cmd::Prefs, "gear", "更多设置"),
+                    (Cmd::Prefs, "gear", "设置"),
                     (Cmd::CheckUpdate, "refresh", "检查更新"),
                 ]
                 .into_iter()

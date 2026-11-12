@@ -1,5 +1,5 @@
 #!/bin/bash
-# EasyMail · 迷你邮件 一键打包：检查 → release 编译（arm64 + x86_64 通用二进制）→ 组装 .app（ad-hoc 签名）→ DMG。
+# EasyMail · 迷你邮件 一键打包：检查 → release 编译（arm64 + x86_64 通用二进制）→ 组装 .app（有 EasyMail Dev 证书则用它签名，否则 ad-hoc）→ DMG。
 #
 # 用法：scripts/build.sh [选项]
 #   --fast        跳过 scripts/check.sh，只编译打包
@@ -129,8 +129,17 @@ cat >"$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-step "ad-hoc 签名"
-codesign --force --deep --sign - "$APP" >/dev/null 2>&1
+# 优先用本机自签名证书「EasyMail Dev」：身份固定，TCC 授权不会因重新编译而失效；
+# 没有这张证书（例如 CI）则回退 ad-hoc 签名（每次构建 cdhash 都变）。
+SIGN_ID="-"
+# 不加 -v：自签名证书没被系统「信任」时会标 NOT_TRUSTED，但 codesign 照样能用它签名
+if security find-identity -p codesigning 2>/dev/null | grep -q "EasyMail Dev"; then
+  SIGN_ID="EasyMail Dev"
+  step "签名（自签名证书 EasyMail Dev）"
+else
+  step "签名（ad-hoc；本机可建「EasyMail Dev」证书以固定签名身份）"
+fi
+codesign --force --deep --sign "$SIGN_ID" "$APP" >/dev/null 2>&1 || fail "签名失败（证书 ${SIGN_ID}）"
 codesign --verify "$APP" || fail "签名校验失败"
 
 if [ "$DMG" = 1 ]; then

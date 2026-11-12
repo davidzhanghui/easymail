@@ -1,9 +1,9 @@
-//! 工具面板：发件人视图、隐私报告、发件箱、本地规则、账号间搬家、连接诊断、回复模板、更多设置、命令面板。
+//! 工具面板：发件人视图、隐私报告、发件箱、本地规则、账号间搬家、连接诊断、回复模板、命令面板。
 //!
 //! 都是「打开时读一次数据、操作后重读」的简单面板，用一个 [`Panel`] 枚举承载状态，在模态层里渲染。
 
 use super::*;
-use crate::core::{archive, outbox, queries::Sender, queries::TrackerRow, rules, tools};
+use crate::core::{archive, outbox, queries::Sender, queries::TrackerRow, rules, tools, updater};
 
 pub enum Panel {
     Senders(Vec<Sender>),
@@ -13,8 +13,16 @@ pub enum Panel {
     Migrate { src: Option<i64>, dest: Option<i64>, progress: Option<(usize, usize)>, result: Option<String> },
     Diagnose { account: Option<i64>, steps: Option<Vec<tools::Step>>, running: bool },
     Templates { list: Vec<Template>, name: Entity<LineInput>, body: Entity<LineInput> },
-    Prefs { inputs: Vec<(&'static str, &'static str, Entity<LineInput>)> },
     Palette { input: Entity<LineInput>, sel: usize },
+    Update { rel: tools::Release, state: UpdateState },
+}
+
+/// 「发现新版本」面板的进度
+#[derive(Clone, Debug, PartialEq)]
+pub enum UpdateState {
+    Idle,
+    Working,
+    Failed(String),
 }
 
 /// 回复模板（存在 kv `templates`）
@@ -71,7 +79,7 @@ pub fn commands() -> Vec<(Cmd, &'static str, &'static str)> {
         (Cmd::Undo, "撤销上一步移动 / 删除", "undo chexiao"),
         (Cmd::ToggleThreads, "切换：按会话合并 / 平铺", "thread huihua"),
         (Cmd::Settings, "账号与设置", "settings account shezhi"),
-        (Cmd::Prefs, "更多设置（撤回发送、更新、OAuth、定时导出）", "prefs more gengduo"),
+        (Cmd::Prefs, "设置（同步、撤回发送、更新、OAuth、定时导出）", "prefs more gengduo shezhi"),
         (Cmd::Import, "导入 .eml / .mbox", "import daoru"),
         (Cmd::Senders, "发件人视图：按发件人整理 / 批量清理", "senders fajianren cleanup"),
         (Cmd::Privacy, "隐私报告：谁在追踪你", "privacy tracker yinsi"),
@@ -129,7 +137,7 @@ impl MailApp {
                 self.open_panel(Panel::Diagnose { account: first, steps: None, running: false }, cx)
             }
             Cmd::Templates => self.open_templates(cx),
-            Cmd::Prefs => self.open_prefs(cx),
+            Cmd::Prefs => self.open_accounts(Tab::Settings, false, window, cx),
             Cmd::Backup => self.backup(cx),
             Cmd::Slim => self.slim(window, cx),
             Cmd::CheckUpdate => self.check_update(true, cx),
@@ -215,32 +223,6 @@ impl MailApp {
         self.open_panel(Panel::Templates { list: load_templates(&self.store), name, body }, cx);
     }
 
-    pub fn open_prefs(&mut self, cx: &mut Context<Self>) {
-        let kv = |k: &str, d: &str| self.store.get_kv(k).unwrap_or_else(|| d.to_string());
-        let defs: [(&'static str, &'static str, String, &'static str); 8] = [
-            ("undo_send_secs", "撤回发送窗口（秒，0 = 立即发送）", kv("undo_send_secs", "5"), "5"),
-            ("check_updates", "自动检查更新（1 开 / 0 关）", kv("check_updates", "1"), "1"),
-            ("strip_tracking", "打开链接时去掉 utm 等跟踪参数（1 / 0）", kv("strip_tracking", "1"), "1"),
-            ("auto_export_dir", "定时增量导出目录（留空 = 关闭）", kv("auto_export_dir", ""), ""),
-            ("auto_export_days", "定时导出间隔（天）", kv("auto_export_days", "7"), "7"),
-            ("oauth.ms_client_id", "Microsoft OAuth Client ID（留空用内置）", kv("oauth.ms_client_id", ""), ""),
-            ("oauth.google_client_id", "Google OAuth Client ID（Gmail OAuth 登录需要）", kv("oauth.google_client_id", ""), ""),
-            ("oauth.google_client_secret", "Google OAuth Client Secret", kv("oauth.google_client_secret", ""), ""),
-        ];
-        let inputs = defs.into_iter().map(|(k, label, v, ph)| (k, label, self.line(ph, &v, cx))).collect();
-        self.open_panel(Panel::Prefs { inputs }, cx);
-    }
-
-    fn save_prefs(&mut self, cx: &mut Context<Self>) {
-        let Some(Modal::Panel(Panel::Prefs { inputs })) = &self.modal else { return };
-        for (k, _, input) in inputs {
-            let v = input.read(cx).text().trim().to_string();
-            self.store.set_kv(k, &v);
-        }
-        self.modal = None;
-        self.toast("设置已保存", false, cx);
-    }
-
     pub fn backup(&mut self, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: false,
@@ -308,12 +290,51 @@ impl MailApp {
         let proxy = self.eng.proxy();
         self.run(async move { tools::check_update(proxy.as_ref()).await }, cx, move |a, r, cx| match r {
             Ok(Some(rel)) => {
-                a.toast_with(format!("发现新版本 {}（当前 {}）", rel.version, crate::core::config::VERSION), false, Some(ToastAction::Open(rel.url)), cx)
+                let msg = format!("发现新版本 {}（当前 {}）", rel.version, crate::core::config::VERSION);
+                if manual {
+                    a.open_update(rel, cx);
+                } else if updater::can_self_update(&rel) {
+                    a.toast_with(msg, false, Some(ToastAction::Update(rel)), cx)
+                } else {
+                    a.toast_with(msg, false, Some(ToastAction::Open(rel.url)), cx)
+                }
             }
             Ok(None) if manual => a.toast(format!("已是最新版本 {}", crate::core::config::VERSION), false, cx),
             Err(e) if manual => a.toast(format!("检查更新失败：{e:#}"), true, cx),
             _ => {}
         });
+    }
+
+    pub fn open_update(&mut self, rel: tools::Release, cx: &mut Context<Self>) {
+        self.open_panel(Panel::Update { rel, state: UpdateState::Idle }, cx);
+    }
+
+    /// 下载 → 验签 → 替换 → 重启。失败时留在面板里显示原因，用户仍可手动下载
+    fn start_update(&mut self, cx: &mut Context<Self>) {
+        let Some(Modal::Panel(Panel::Update { rel, state })) = &mut self.modal else { return };
+        if *state == UpdateState::Working {
+            return;
+        }
+        *state = UpdateState::Working;
+        let rel = rel.clone();
+        let proxy = self.eng.proxy();
+        let proxy_url = self.store.settings().proxy_url;
+        self.run(async move { updater::prepare(&rel, proxy.as_ref(), &proxy_url).await }, cx, |a, r, cx| {
+            let fail = |a: &mut Self, e: String, cx: &mut Context<Self>| {
+                if let Some(Modal::Panel(Panel::Update { state, .. })) = &mut a.modal {
+                    *state = UpdateState::Failed(e);
+                }
+                cx.notify();
+            };
+            match r {
+                Ok(staged) => match updater::relaunch(&staged) {
+                    Ok(()) => cx.quit(),
+                    Err(e) => fail(a, format!("{e:#}"), cx),
+                },
+                Err(e) => fail(a, format!("{e:#}"), cx),
+            }
+        });
+        cx.notify();
     }
 
     fn sender_bulk(&mut self, address: String, action: &'static str, window: &mut Window, cx: &mut Context<Self>) {
@@ -821,6 +842,44 @@ impl MailApp {
                 );
                 modal_shell(t, 700., "连接诊断", "代理 → 域名解析 → 端口 → TLS → 登录", close).child(b).child(footer).into_any_element()
             }
+            Panel::Update { rel, state } => {
+                let can = updater::can_self_update(rel);
+                let working = *state == UpdateState::Working;
+                let mut b = body;
+                if !rel.notes.trim().is_empty() {
+                    b = b.child(div().text_size(px(12.)).line_height(px(19.)).text_color(t.ink_2).child(rel.notes.trim().to_string()));
+                }
+                b = b.child(div().mt(px(8.)).text_size(px(11.5)).text_color(t.muted).child(if can {
+                    "更新包用 Ed25519 签名校验后才会安装；完成后应用会自动重启。邮件数据不受影响。"
+                } else {
+                    "这个版本不能自动更新（没有签名文件，或不是从 .app 启动的），请前往下载页手动安装。"
+                }));
+                match state {
+                    UpdateState::Working => b = b.child(div().mt(px(8.)).text_color(t.accent).child("正在下载并校验更新包…（完成后自动重启）")),
+                    UpdateState::Failed(e) => b = b.child(div().mt(px(8.)).text_color(t.danger).child(format!("更新失败：{e}"))),
+                    UpdateState::Idle => {}
+                }
+                let url = rel.url.clone();
+                let footer = modal_footer(t)
+                    .child(button("up-page", t, Kind::Ghost, None, "查看发布页", false).on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url))))
+                    .child(div().flex_1())
+                    .child(disabled(button("up-later", t, Kind::Secondary, None, "稍后", false), working).on_click(cx.listener(|a, _, w, cx| {
+                        a.modal = None;
+                        w.focus(&a.focus);
+                        cx.notify();
+                    })))
+                    .child(if can {
+                        disabled(button("up-go", t, Kind::Primary, None, if working { "更新中…" } else { "立即更新" }, false), working)
+                            .on_click(cx.listener(|a, _, _, cx| a.start_update(cx)))
+                    } else {
+                        let url = rel.url.clone();
+                        button("up-dl", t, Kind::Primary, None, "前往下载", false).on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url)))
+                    });
+                modal_shell(t, 560., format!("发现新版本 {}", rel.version), format!("当前 {}", crate::core::config::VERSION), close)
+                    .child(b)
+                    .child(footer)
+                    .into_any_element()
+            }
             Panel::Templates { list, name, body: tb } => {
                 let (f1, f2) = (name.read(cx).is_focused(window), tb.read(cx).is_focused(window));
                 let mut b = body.child(div().text_size(px(11.5)).text_color(t.muted).child("在写信窗口点「模板」插入。"));
@@ -860,28 +919,6 @@ impl MailApp {
                     }),
                 ));
                 modal_shell(t, 620., "回复模板", format!("{} 个", list.len()), close).child(b).child(footer).into_any_element()
-            }
-            Panel::Prefs { inputs } => {
-                let mut b = body;
-                for (k, label, input) in inputs {
-                    let focused = input.read(cx).is_focused(window);
-                    b = b.child(
-                        div()
-                            .id(SharedString::from(format!("pref-{k}")))
-                            .flex()
-                            .items_center()
-                            .gap(px(10.))
-                            .child(div().w(px(250.)).flex_none().text_size(px(12.)).text_color(t.ink_2).child(*label))
-                            .child(field_box(t, focused).flex_1().child(div().flex_1().child(input.clone()))),
-                    );
-                }
-                b = b.child(div().mt(px(6.)).text_size(px(11.)).text_color(t.muted).child(
-                    "Microsoft OAuth 使用内置的应用（Azure 中注册为「移动和桌面应用」，重定向 http://localhost）。Google 不允许开源客户端内置密钥，Gmail 走 OAuth 需要填你自己在 Google Cloud 创建的「桌面应用」凭据；不填则继续使用应用专用密码。",
-                ));
-                let footer = modal_footer(t)
-                    .child(div().flex_1())
-                    .child(button("pref-save", t, Kind::Primary, None, "保存", false).on_click(cx.listener(|a, _, _, cx| a.save_prefs(cx))));
-                modal_shell(t, 720., "更多设置", "", close).child(b).child(footer).into_any_element()
             }
         }
     }

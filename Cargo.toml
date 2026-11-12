@@ -1,6 +1,6 @@
 [package]
 name = "easymail"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 license = "MIT"
 description = "EasyMail · 迷你邮件 —— 本地优先的多账号邮件客户端与归档工具（Rust + GPUI，macOS）"
@@ -55,6 +55,8 @@ html2text = "0.13"
 aes-gcm = "0.10"
 # OAuth2 PKCE 的 code_challenge
 sha2 = "0.10"
+# 更新包 Ed25519 验签（rustls 已经带了 ring，不增加新的编译依赖）
+ring = "0.17"
 
 # macOS 原生：WKWebView、Dock 角标、托盘、通知
 objc2 = "0.6"

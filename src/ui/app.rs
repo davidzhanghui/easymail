@@ -134,6 +134,8 @@ pub enum ToastAction {
     Open(String),
     /// 复制文字（验证码）
     Copy(String),
+    /// 打开「发现新版本」面板（可一键更新）
+    Update(crate::core::tools::Release),
 }
 
 pub struct MailApp {
@@ -570,6 +572,7 @@ impl MailApp {
             Some(ToastAction::Unsend(_)) => (crate::core::outbox::undo_secs(&self.store) * 1000).max(3200) as u64,
             Some(ToastAction::Open(_)) => 12000,
             Some(ToastAction::Copy(_)) => 15000,
+            Some(ToastAction::Update(_)) => 20000,
             None if error => 6000,
             None => 3200,
         };
@@ -731,6 +734,7 @@ impl MailApp {
             ToastAction::Undo => self.undo(cx),
             ToastAction::Unsend(id) => self.unsend(id, window, cx),
             ToastAction::Open(url) => cx.open_url(&url),
+            ToastAction::Update(rel) => self.open_update(rel, cx),
             ToastAction::Copy(text) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
                 self.toast("已复制", false, cx);
@@ -1761,6 +1765,7 @@ impl Render for MailApp {
                     ToastAction::Unsend(_) => "撤回",
                     ToastAction::Open(_) => "查看",
                     ToastAction::Copy(_) => "复制",
+                    ToastAction::Update(_) => "更新",
                 };
                 div()
                     .id(("toast-act", tt.id as usize))

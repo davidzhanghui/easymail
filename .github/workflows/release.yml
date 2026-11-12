@@ -59,6 +59,21 @@ jobs:
           scripts/build.sh --fast
           cd dist && shasum -a 256 EasyMail-*.dmg > SHA256SUMS.txt && cat SHA256SUMS.txt
 
+      - name: 签名更新清单（Ed25519，应用内自动更新用）
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          if [ -z "$UPDATE_SIGNING_KEY" ]; then
+            echo "::warning::未配置 UPDATE_SIGNING_KEY：本次发布不带更新签名，应用内只能提示新版本、不能自动更新"
+            exit 0
+          fi
+          umask 077
+          printf '%s\n' "$UPDATE_SIGNING_KEY" > "$RUNNER_TEMP/update-key.pem"
+          "$(brew --prefix openssl@3)/bin/openssl" pkeyutl -sign -rawin -inkey "$RUNNER_TEMP/update-key.pem" \
+            -in dist/SHA256SUMS.txt -out dist/SHA256SUMS.txt.sig
+          rm -f "$RUNNER_TEMP/update-key.pem"
+          ls -l dist/SHA256SUMS.txt.sig
+
       - name: 发布说明
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -89,5 +104,5 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$RELEASE_TAG" dist/EasyMail-*.dmg dist/SHA256SUMS.txt \
+          gh release create "$RELEASE_TAG" dist/EasyMail-*.dmg dist/SHA256SUMS.txt* \
             -R "$GITHUB_REPOSITORY" --title "EasyMail $RELEASE_TAG" --notes-file notes.md

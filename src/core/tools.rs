@@ -49,6 +49,14 @@ pub struct Release {
     pub version: String,
     pub url: String,
     pub notes: String,
+    /// 发布附件：(文件名, 下载地址)，用于应用内自动更新
+    pub assets: Vec<(String, String)>,
+}
+
+impl Release {
+    pub fn asset(&self, name: &str) -> Option<&str> {
+        self.assets.iter().find(|(n, _)| n == name).map(|(_, u)| u.as_str())
+    }
 }
 
 /// "v1.2.3" / "1.2.3-beta" → (1, 2, 3)
@@ -77,6 +85,11 @@ pub async fn check_update(proxy: Option<&Proxy>) -> Result<Option<Release>> {
         version: tag.trim_start_matches('v').to_string(),
         url: j.get("html_url").and_then(|v| v.as_str()).unwrap_or(RELEASES_PAGE).to_string(),
         notes: j.get("body").and_then(|v| v.as_str()).unwrap_or("").chars().take(600).collect(),
+        assets: j
+            .get("assets")
+            .and_then(|a| a.as_array())
+            .map(|a| a.iter().filter_map(|x| Some((x.get("name")?.as_str()?.to_string(), x.get("browser_download_url")?.as_str()?.to_string()))).collect())
+            .unwrap_or_default(),
     }))
 }
 

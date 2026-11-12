@@ -129,7 +129,8 @@ easymail-cli mcp          # 以 stdio 方式运行 MCP 服务器
 - 没有任何遥测与统计。App 只会访问以下网络地址：
   - 你配置的邮件服务器（及代理）；
   - 你点「显示图片」或把发件人加入白名单后放行的远程图片；
-  - 检查更新：每天最多一次请求 GitHub Releases 的公开接口，不带任何设备标识；可在「更多设置」里关闭；
+  - 检查更新：每天最多一次请求 GitHub Releases 的公开接口，不带任何设备标识；可在「账号与设置 → 设置」里关闭；
+  - 仅在你点「立即更新」时：从 GitHub Releases 下载新版 dmg。更新包先用内置公钥校验 Ed25519 签名和 SHA-256，通过才会安装，之后自动重启；不签名的发布只提示、不自动安装；
   - 仅在你主动操作时：OAuth 登录（Microsoft / Google 授权服务器）、按邮箱自动查找服务器配置（域名自身的 autoconfig 与 Thunderbird 公共配置库）、一键退订（请求发件人提供的退订地址）。
 - 邮箱密码 / OAuth 令牌用 AES-256-GCM 加密后存在本机数据库，密钥在 `master.key`（0600）。「完整备份」会把 `master.key` 一起备份，备份目录请像密码一样保管。
 - 邮件正文（`.eml` 与数据库）在本机不额外加密，依赖系统的 FileVault 全盘加密，建议开启。
@@ -137,7 +138,7 @@ easymail-cli mcp          # 以 stdio 方式运行 MCP 服务器
 
 ### Outlook / Microsoft 365 的 OAuth
 
-内置的 Client ID 在 Azure 中注册为「移动和桌面应用程序」，重定向 URI 为 `http://localhost`，支持任意组织账号与个人 Microsoft 账号。若你的组织要求使用自己的应用注册，在「更多设置」里填入你的 Client ID 即可（同样需要 `IMAP.AccessAsUser.All`、`SMTP.Send`、`offline_access` 权限）。Gmail 的 OAuth 需要你在 Google Cloud 创建「桌面应用」凭据并填入 Client ID / Secret；不填则继续用应用专用密码。
+内置的 Client ID 在 Azure 中注册为「移动和桌面应用程序」，重定向 URI 为 `http://localhost`，支持任意组织账号与个人 Microsoft 账号。若你的组织要求使用自己的应用注册，在「账号与设置 → 设置」里填入你的 Client ID 即可（同样需要 `IMAP.AccessAsUser.All`、`SMTP.Send`、`offline_access` 权限）。Gmail 的 OAuth 需要你在 Google Cloud 创建「桌面应用」凭据并填入 Client ID / Secret；不填则继续用应用专用密码。
 
 ### 已知限制
 

@@ -240,6 +240,22 @@ pub fn email_from_id_token(jwt: &str) -> Option<String> {
     ["email", "preferred_username", "upn"].iter().find_map(|k| j.get(*k).and_then(|v| v.as_str()).filter(|s| s.contains('@')).map(|s| s.to_lowercase()))
 }
 
+/// 诊断用：摘出 access_token 里的 aud / scp / tid（只解码不校验；消费者账号的令牌可能不是 JWT）。绝不包含令牌本身。
+pub fn token_summary(jwt: &str) -> String {
+    let claims = jwt
+        .split('.')
+        .nth(1)
+        .and_then(|p| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(p.trim_end_matches('=')).ok())
+        .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok());
+    match claims {
+        Some(j) => {
+            let g = |k: &str| j.get(k).and_then(|v| v.as_str()).unwrap_or("-").to_string();
+            format!("令牌 aud={} scp={} tid={}", g("aud"), g("scp"), g("tid"))
+        }
+        None => "令牌不是 JWT（消费者账号常见），无法解码".to_string(),
+    }
+}
+
 /// 同一账号同时只刷新一次（多个连接同时发现过期时不重复换令牌，也避免旧 refresh_token 被用两次）
 static REFRESH: Mutex<()> = Mutex::new(());
 

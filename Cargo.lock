@@ -1261,7 +1261,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "easymail"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1288,6 +1288,7 @@ dependencies = [
  "rand 0.8.8",
  "raw-window-handle",
  "regex",
+ "ring",
  "rusqlite",
  "rustls",
  "rustls-platform-verifier",

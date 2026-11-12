@@ -112,6 +112,13 @@ pub struct Imap {
 /// 把登录失败转成可读的提示
 pub fn explain_login_error(acc: &Account, e: &str) -> String {
     let l = e.to_lowercase();
+    if l.contains("authenticated but not connected") {
+        // 令牌已被接受，但 Exchange 不让这个邮箱走 IMAP：不是重新授权能解决的
+        return format!(
+            "令牌有效，但服务器拒绝该邮箱的 IMAP 连接：请确认邮箱已启用 IMAP、账号已在网页端完成初始化且没有被风控；组织账号还需管理员放行（{}）",
+            e.trim()
+        );
+    }
     if l.contains("auth") || l.contains("login") || l.contains("password") || l.contains("credentials") || l.contains("invalid") || e.contains("密码") {
         format!("登录被拒绝：{}（{}）", super::providers::provider(&acc.provider).auth_hint, e.trim())
     } else {
@@ -154,7 +161,11 @@ impl Imap {
             Ok(Ok(s)) => s,
             // 服务器明确拒绝登录 → 认证类错误：停止自动重试，等用户改密码
             Ok(Err((e @ (async_imap::error::Error::No(_) | async_imap::error::Error::Bad(_)), _))) => {
-                return Err(error::auth(explain_login_error(acc, &e.to_string())))
+                let mut msg = explain_login_error(acc, &e.to_string());
+                if acc.is_oauth() {
+                    msg = format!("{msg}［{}］", super::oauth::token_summary(secret));
+                }
+                return Err(error::auth(msg));
             }
             Ok(Err((e, _))) => bail!("{}", explain_login_error(acc, &e.to_string())),
             Err(_) => bail!("登录超时"),

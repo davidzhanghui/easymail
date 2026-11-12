@@ -26,4 +26,5 @@ pub mod smtp;
 pub mod snooze;
 pub mod tools;
 pub mod transfer;
+pub mod updater;
 pub mod utf7;
