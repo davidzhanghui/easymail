@@ -3,18 +3,58 @@
 //! 都是「打开时读一次数据、操作后重读」的简单面板，用一个 [`Panel`] 枚举承载状态，在模态层里渲染。
 
 use super::*;
-use crate::core::{archive, outbox, queries::Sender, queries::TrackerRow, rules, tools, updater};
+use crate::core::{archive, backup_pack, outbox, queries::Sender, queries::TrackerRow, rules, tools, updater};
+use crate::ui::text_area::{TextArea, TextAreaEvent};
+use std::path::PathBuf;
 
 pub enum Panel {
     Senders(Vec<Sender>),
     Privacy(Vec<TrackerRow>),
     Outbox(Vec<outbox::Item>),
-    Rules { list: Vec<rules::Rule>, field: usize, action: usize, target: Option<i64>, value: Entity<LineInput> },
-    Migrate { src: Option<i64>, dest: Option<i64>, progress: Option<(usize, usize)>, result: Option<String> },
-    Diagnose { account: Option<i64>, steps: Option<Vec<tools::Step>>, running: bool },
-    Templates { list: Vec<Template>, name: Entity<LineInput>, body: Entity<LineInput> },
-    Palette { input: Entity<LineInput>, sel: usize },
-    Update { rel: tools::Release, state: UpdateState },
+    Rules {
+        list: Vec<rules::Rule>,
+        field: usize,
+        action: usize,
+        target: Option<i64>,
+        value: Entity<LineInput>,
+    },
+    Migrate {
+        src: Option<i64>,
+        dest: Option<i64>,
+        progress: Option<(usize, usize)>,
+        result: Option<String>,
+    },
+    Diagnose {
+        account: Option<i64>,
+        steps: Option<Vec<tools::Step>>,
+        running: bool,
+    },
+    Templates {
+        list: Vec<Template>,
+        name: Entity<LineInput>,
+        body: Entity<TextArea>,
+    },
+    Palette {
+        input: Entity<LineInput>,
+        sel: usize,
+    },
+    Update {
+        rel: tools::Release,
+        state: UpdateState,
+    },
+    /// 完整备份：可选密码（留空 = 不加密）
+    Backup {
+        pw: Entity<LineInput>,
+        pw2: Entity<LineInput>,
+        error: Option<String>,
+    },
+    /// 从加密备份恢复：输入密码
+    Restore {
+        source: PathBuf,
+        pw: Entity<LineInput>,
+        busy: bool,
+        error: Option<String>,
+    },
 }
 
 /// 「发现新版本」面板的进度
@@ -66,6 +106,7 @@ pub enum Cmd {
     Templates,
     Prefs,
     Backup,
+    Restore,
     Slim,
     CheckUpdate,
     Undo,
@@ -88,7 +129,8 @@ pub fn commands() -> Vec<(Cmd, &'static str, &'static str)> {
         (Cmd::Templates, "回复模板", "templates moban"),
         (Cmd::Migrate, "账号间搬家（复制文件夹）", "migrate copy banjia"),
         (Cmd::Diagnose, "连接诊断", "diagnose zhenduan"),
-        (Cmd::Backup, "完整备份（附校验报告）", "backup beifen"),
+        (Cmd::Backup, "完整备份（附校验报告，可加密）", "backup beifen"),
+        (Cmd::Restore, "从备份恢复…（目录或 .embak 加密备份）", "restore huifu beifen"),
         (Cmd::Slim, "安全瘦身（清理旧的本地正文缓存）", "slim shoushen"),
         (Cmd::CheckUpdate, "检查更新", "update gengxin"),
     ];
@@ -136,9 +178,10 @@ impl MailApp {
                 let first = self.accounts.iter().find(|a| !a.is_local()).map(|a| a.id);
                 self.open_panel(Panel::Diagnose { account: first, steps: None, running: false }, cx)
             }
-            Cmd::Templates => self.open_templates(cx),
+            Cmd::Templates => self.open_templates(window, cx),
             Cmd::Prefs => self.open_accounts(Tab::Settings, false, window, cx),
-            Cmd::Backup => self.backup(cx),
+            Cmd::Backup => self.open_backup(window, cx),
+            Cmd::Restore => self.restore(window, cx),
             Cmd::Slim => self.slim(window, cx),
             Cmd::CheckUpdate => self.check_update(true, cx),
             Cmd::Undo => self.undo(cx),
@@ -162,9 +205,18 @@ impl MailApp {
             let Some(Modal::Panel(Panel::Palette { input, sel })) = &mut this.modal else { return };
             let n = filter_cmds(&input.read(cx).text()).len();
             match ev {
-                InputEvent::Changed => *sel = 0,
-                InputEvent::Down => *sel = (*sel + 1).min(n.saturating_sub(1)),
-                InputEvent::Up => *sel = sel.saturating_sub(1),
+                InputEvent::Changed => {
+                    *sel = 0;
+                    this.palette_scroll.scroll_to_item(0);
+                }
+                InputEvent::Down => {
+                    *sel = (*sel + 1).min(n.saturating_sub(1));
+                    this.palette_scroll.scroll_to_item(*sel);
+                }
+                InputEvent::Up => {
+                    *sel = sel.saturating_sub(1);
+                    this.palette_scroll.scroll_to_item(*sel);
+                }
                 InputEvent::Submit { .. } => {
                     let list = filter_cmds(&input.read(cx).text());
                     if let Some((c, _)) = list.get(*sel).copied() {
@@ -217,13 +269,96 @@ impl MailApp {
         }
     }
 
-    pub fn open_templates(&mut self, cx: &mut Context<Self>) {
+    pub fn open_templates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = self.line("模板名称", "", cx);
-        let body = self.line("模板正文（插入到写信窗口的光标处）", "", cx);
-        self.open_panel(Panel::Templates { list: load_templates(&self.store), name, body }, cx);
+        // 正文可以多行：和账号设置里的签名一样用多行文本框
+        let body = cx.new(|cx| TextArea::new("", "模板正文（插入到写信窗口的光标处）。⌘↵ 添加", cx));
+        // Tab / Shift-Tab 在「名称 ↔ 正文」之间切换；名称里按回车跳到正文；正文里 ⌘↵ 直接添加
+        let (name_h, body_h) = (name.focus_handle(cx), body.focus_handle(cx));
+        let sub_name = cx.subscribe_in(&name, window, {
+            let body_h = body_h.clone();
+            move |this: &mut Self, _, ev: &InputEvent, window, cx| match ev {
+                InputEvent::Tab { .. } | InputEvent::Submit { .. } => window.focus(&body_h),
+                InputEvent::Cancel => {
+                    this.modal = None;
+                    window.focus(&this.focus);
+                    cx.notify();
+                }
+                _ => {}
+            }
+        });
+        let sub_body = cx.subscribe_in(&body, window, move |this: &mut Self, _, ev: &TextAreaEvent, window, cx| match ev {
+            TextAreaEvent::Tab | TextAreaEvent::BackTab => window.focus(&name_h),
+            TextAreaEvent::Commit => this.add_template(window, cx),
+            TextAreaEvent::Cancel => {
+                this.modal = None;
+                window.focus(&this.focus);
+                cx.notify();
+            }
+            _ => {}
+        });
+        self.open_panel(Panel::Templates { list: load_templates(&self.store), name: name.clone(), body }, cx);
+        self.modal_sub = Some(Subscription::join(sub_name, sub_body));
+        window.focus(&name.focus_handle(cx));
     }
 
-    pub fn backup(&mut self, cx: &mut Context<Self>) {
+    /// 把输入框里的名称 / 正文存成一个新模板，然后重新打开面板（清空输入、列表刷新）
+    fn add_template(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Modal::Panel(Panel::Templates { name, body, .. })) = &self.modal else { return };
+        let (n, bd) = (name.read(cx).text(), body.read(cx).text().to_string());
+        if n.trim().is_empty() || bd.trim().is_empty() {
+            self.toast("请填写模板名称和正文", true, cx);
+            return;
+        }
+        let mut v = load_templates(&self.store);
+        v.push(Template { name: n.trim().into(), body: bd });
+        save_templates(&self.store, &v);
+        self.open_templates(window, cx);
+    }
+
+    /// 完整备份面板：可选设置密码；留空 = 不加密（备份目录），设了密码 = 单个 .embak 加密文件
+    pub fn open_backup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pw = self.line("备份密码（可选，留空 = 不加密）", "", cx);
+        let pw2 = self.line("再输入一次密码", "", cx);
+        pw.update(cx, |i, cx| i.set_masked(true, cx));
+        pw2.update(cx, |i, cx| i.set_masked(true, cx));
+        let (h1, h2) = (pw.focus_handle(cx), pw2.focus_handle(cx));
+        let s1 = cx.subscribe_in(&pw, window, {
+            let h2 = h2.clone();
+            move |this: &mut Self, _, ev: &InputEvent, window, cx| match ev {
+                InputEvent::Tab { .. } | InputEvent::Submit { .. } => window.focus(&h2),
+                InputEvent::Cancel => this.close_modal(window, cx),
+                _ => {}
+            }
+        });
+        let s2 = cx.subscribe_in(&pw2, window, move |this: &mut Self, _, ev: &InputEvent, window, cx| match ev {
+            InputEvent::Tab { .. } => window.focus(&h1),
+            InputEvent::Submit { .. } => this.start_backup(window, cx),
+            InputEvent::Cancel => this.close_modal(window, cx),
+            _ => {}
+        });
+        let first = pw.focus_handle(cx);
+        self.open_panel(Panel::Backup { pw, pw2, error: None }, cx);
+        self.modal_sub = Some(Subscription::join(s1, s2));
+        window.focus(&first);
+    }
+
+    fn close_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.modal = None;
+        window.focus(&self.focus);
+        cx.notify();
+    }
+
+    fn start_backup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Modal::Panel(Panel::Backup { pw, pw2, error })) = &mut self.modal else { return };
+        let (p1, p2) = (pw.read(cx).text(), pw2.read(cx).text());
+        if p1 != p2 {
+            *error = Some("两次输入的密码不一致".into());
+            cx.notify();
+            return;
+        }
+        let password = p1.to_string();
+        self.close_modal(window, cx);
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -234,11 +369,21 @@ impl MailApp {
         let store = self.store.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let Some(dir) = rx.await.ok().and_then(|r| r.ok()).flatten().and_then(|v| v.into_iter().next()) else { return };
-            this.update(cx, |a, cx| a.toast("正在备份…", false, cx)).ok();
-            let r = cx.background_spawn(async move { archive::backup(&store, &dir) }).await;
+            this.update(cx, |a, cx| a.toast(if password.is_empty() { "正在备份…" } else { "正在备份并加密…" }, false, cx)).ok();
+            let enc = !password.is_empty();
+            let r = cx
+                .background_spawn(async move {
+                    if enc {
+                        backup_pack::backup_encrypted(&store, &dir, &password)
+                    } else {
+                        archive::backup(&store, &dir)
+                    }
+                })
+                .await;
             this.update(cx, |a, cx| match r {
                 Ok(rep) if rep.verified => {
-                    a.toast(format!("备份完成并校验通过：{} 封、{}（{}）", rep.messages, fmt_size(rep.bytes), rep.dir.display()), false, cx);
+                    let what = if enc { "加密备份完成并校验通过" } else { "备份完成并校验通过" };
+                    a.toast(format!("{what}：{} 封、{}（{}）", rep.messages, fmt_size(rep.bytes), rep.dir.display()), false, cx);
                     cx.reveal_path(&rep.dir);
                 }
                 Ok(rep) => a.toast(format!("备份完成，但校验发现 {} 个问题，详见 校验报告.txt", rep.problems.len()), true, cx),
@@ -247,6 +392,122 @@ impl MailApp {
             .ok();
         })
         .detach();
+    }
+
+    /// 从备份恢复：先选备份（目录或 .embak 文件）；加密的要输入密码，校验通过后确认并重启
+    pub fn restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: true,
+            multiple: false,
+            prompt: Some("选择备份".into()),
+            allowed_extensions: None,
+        });
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let Some(src) = rx.await.ok().and_then(|r| r.ok()).flatten().and_then(|v| v.into_iter().next()) else { return };
+            this.update_in(cx, |a, window, cx| {
+                if backup_pack::is_encrypted(&src) {
+                    let pw = a.line("备份密码", "", cx);
+                    pw.update(cx, |i, cx| i.set_masked(true, cx));
+                    let sub = cx.subscribe_in(&pw, window, |this: &mut Self, _, ev: &InputEvent, window, cx| match ev {
+                        InputEvent::Submit { .. } => this.start_restore(window, cx),
+                        InputEvent::Cancel => this.close_modal(window, cx),
+                        _ => {}
+                    });
+                    let h = pw.focus_handle(cx);
+                    a.open_panel(Panel::Restore { source: src, pw, busy: false, error: None }, cx);
+                    a.modal_sub = Some(sub);
+                    window.focus(&h);
+                } else {
+                    a.stage_restore(src, None, window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn start_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Modal::Panel(Panel::Restore { source, pw, busy, error })) = &mut self.modal else { return };
+        if *busy {
+            return;
+        }
+        *busy = true;
+        *error = None;
+        let (src, password) = (source.clone(), pw.read(cx).text().to_string());
+        cx.notify();
+        self.stage_restore(src, Some(password), window, cx);
+    }
+
+    /// 后台校验 / 解出备份到暂存目录；通过后让用户确认，再重启切换数据
+    fn stage_restore(&mut self, src: PathBuf, password: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if password.is_none() {
+            self.toast("正在校验备份…", false, cx);
+        }
+        let data = self.store.dir().to_path_buf();
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let d = data.clone();
+            let r = cx.background_spawn(async move { backup_pack::stage_restore(&src, password.as_deref(), &d) }).await;
+            this.update_in(cx, |a, window, cx| match r {
+                Err(e) => {
+                    if let Some(Modal::Panel(Panel::Restore { busy, error, .. })) = &mut a.modal {
+                        *busy = false;
+                        *error = Some(format!("{e:#}"));
+                        cx.notify();
+                    } else {
+                        a.toast(format!("无法恢复：{e:#}"), true, cx);
+                    }
+                }
+                Ok(info) => {
+                    a.close_modal(window, cx);
+                    let answer = window.prompt(
+                        PromptLevel::Warning,
+                        &format!("用备份替换当前数据？（{} 个账号、{} 封邮件、{} 封有正文）", info.accounts, info.messages, info.with_body),
+                        Some("当前的邮件、账号、设置会被备份里的内容替换，应用随后自动重启。\n\n旧数据不会被删除：会保留在数据目录旁的 data.before-restore-… 文件夹里，确认没问题后可以手动删除。"),
+                        &["恢复并重启", "取消"],
+                        cx,
+                    );
+                    let data = data.clone();
+                    cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                        if answer.await.ok() == Some(0) {
+                            this.update(cx, |a, cx| a.relaunch_for_restore(cx)).ok();
+                        } else {
+                            let _ = std::fs::remove_dir_all(backup_pack::pending_dir(&data));
+                        }
+                    })
+                    .detach();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// 退出并重新打开应用：启动时 `apply_pending` 完成数据切换
+    fn relaunch_for_restore(&mut self, cx: &mut Context<Self>) {
+        let pid = std::process::id().to_string();
+        let target = updater::installed_app().map(|p| p.display().to_string());
+        match &target {
+            Some(app) => {
+                use std::os::unix::process::CommandExt;
+                let ok = std::process::Command::new("/bin/sh")
+                    .args(["-c", "while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; open \"$2\"", "sh", &pid, app])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .process_group(0)
+                    .spawn()
+                    .is_ok();
+                if !ok {
+                    self.toast("恢复数据已就绪，请手动重新打开应用", false, cx);
+                    return;
+                }
+                cx.quit();
+            }
+            None => {
+                self.toast("恢复数据已就绪：请退出后重新启动应用（开发模式不会自动重启）", false, cx);
+            }
+        }
     }
 
     pub fn slim(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -505,8 +766,11 @@ impl MailApp {
                 let list = filter_cmds(&input.read(cx).text());
                 let sel = (*sel).min(list.len().saturating_sub(1));
                 let focused = input.read(cx).is_focused(window);
-                let mut b = div().flex().flex_col().gap(px(2.)).p(px(10.)).max_h(px(380.)).overflow_hidden();
-                for (i, (c, label)) in list.into_iter().enumerate().take(14) {
+                let total = list.len();
+                // 全部命令都能滚动到；↑↓ 选择时选中项自动滚进可视区
+                let mut b =
+                    div().id("cmd-list").flex().flex_col().gap(px(2.)).p(px(10.)).max_h(px(380.)).overflow_y_scroll().track_scroll(&self.palette_scroll);
+                for (i, (c, label)) in list.into_iter().enumerate() {
                     b = b.child(
                         div()
                             .id(("cmd", i))
@@ -536,7 +800,14 @@ impl MailApp {
                             .child(field_box(t, focused).child(icon("search", 14., t.muted)).child(div().flex_1().child(input.clone()))),
                     )
                     .child(b)
-                    .child(div().px(px(16.)).py(px(8.)).text_size(px(11.)).text_color(t.faint).child("↑↓ 选择 · ↵ 执行 · Esc 关闭 · ⌘K 随时打开"))
+                    .child(
+                        div()
+                            .px(px(16.))
+                            .py(px(8.))
+                            .text_size(px(11.))
+                            .text_color(t.faint)
+                            .child(format!("共 {total} 项 · ↑↓ 选择 · ↵ 执行 · Esc 关闭 · ⌘K 随时打开")),
+                    )
                     .into_any_element()
             }
             Panel::Senders(rows) => {
@@ -880,44 +1151,87 @@ impl MailApp {
                     .child(footer)
                     .into_any_element()
             }
+            Panel::Backup { pw, pw2, error } => {
+                let (f1, f2) = (pw.read(cx).is_focused(window), pw2.read(cx).is_focused(window));
+                let enc = !pw.read(cx).text().is_empty();
+                let mut b = body
+                    .child(div().text_size(px(12.)).line_height(px(19.)).text_color(t.ink_2).child(
+                        "备份包含数据库快照、每封邮件的原文、发信附件，以及账号凭据的加密密钥。密码留空 = 保存成一个文件夹（不加密）；设置密码 = 保存成单个 .embak 加密文件，密钥也在密文里。",
+                    ))
+                    .child(field_box(t, f1).child(div().flex_1().child(pw.clone())))
+                    .child(field_box(t, f2).child(div().flex_1().child(pw2.clone())))
+                    .child(div().text_size(px(11.5)).text_color(t.muted).child("密码无法找回：忘记密码就无法恢复这份备份。"));
+                if let Some(e) = error {
+                    b = b.child(div().text_color(t.danger).text_size(px(12.)).child(e.clone()));
+                }
+                let footer = modal_footer(t).child(div().flex_1()).child(
+                    button("bk-go", t, Kind::Primary, Some("download"), if enc { "选择位置并加密备份" } else { "选择位置并备份" }, false)
+                        .on_click(cx.listener(|a, _, w, cx| a.start_backup(w, cx))),
+                );
+                modal_shell(t, 560., "完整备份", "附校验报告，可选密码加密", close).child(b).child(footer).into_any_element()
+            }
+            Panel::Restore { source, pw, busy, error } => {
+                let focused = pw.read(cx).is_focused(window);
+                let busy = *busy;
+                let mut b = body
+                    .child(div().text_size(px(12.)).text_color(t.ink_2).child(format!("加密备份：{}", source.display())))
+                    .child(field_box(t, focused).child(div().flex_1().child(pw.clone())));
+                if busy {
+                    b = b.child(div().text_color(t.accent).child("正在解密并校验备份…（大备份需要一会儿）"));
+                }
+                if let Some(e) = error {
+                    b = b.child(div().text_color(t.danger).text_size(px(12.)).child(e.clone()));
+                }
+                let footer = modal_footer(t).child(div().flex_1()).child(
+                    disabled(button("rs-go", t, Kind::Primary, None, if busy { "校验中…" } else { "校验并继续" }, false), busy)
+                        .on_click(cx.listener(|a, _, w, cx| a.start_restore(w, cx))),
+                );
+                modal_shell(t, 560., "从加密备份恢复", "输入创建备份时设置的密码", close).child(b).child(footer).into_any_element()
+            }
             Panel::Templates { list, name, body: tb } => {
-                let (f1, f2) = (name.read(cx).is_focused(window), tb.read(cx).is_focused(window));
-                let mut b = body.child(div().text_size(px(11.5)).text_color(t.muted).child("在写信窗口点「模板」插入。"));
+                let (f1, f2) = (name.read(cx).is_focused(window), tb.focus_handle(cx).is_focused(window));
+                let mut b = body.child(div().text_size(px(11.5)).text_color(t.muted).child("在写信窗口点「模板」插入。Tab 在名称和正文之间切换。"));
                 for (i, tp) in list.iter().enumerate() {
                     b = b.child(
                         row(SharedString::from(format!("tp-{i}")))
                             .child(div().w(px(120.)).flex_none().font_weight(FontWeight::SEMIBOLD).child(tp.name.clone()))
-                            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(t.ink_2).child(tp.body.clone()))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_color(t.ink_2)
+                                    .child(one_line(&tp.body, 200)),
+                            )
                             .child(button(SharedString::from(format!("tp-del-{i}")), t, Kind::Ghost, Some("trash"), "", true).on_click(cx.listener(
-                                move |a, _, _, cx| {
+                                move |a, _, w, cx| {
                                     let mut v = load_templates(&a.store);
                                     if i < v.len() {
                                         v.remove(i);
                                     }
                                     save_templates(&a.store, &v);
-                                    a.open_templates(cx);
+                                    a.open_templates(w, cx);
                                 },
                             ))),
                     );
                 }
-                b = b
-                    .child(div().h(px(1.)).bg(t.border_soft).my(px(8.)))
-                    .child(field_box(t, f1).child(div().flex_1().child(name.clone())))
-                    .child(field_box(t, f2).child(div().flex_1().child(tb.clone())));
-                let footer = modal_footer(t).child(div().flex_1()).child(button("tp-add", t, Kind::Primary, Some("plus"), "添加模板", false).on_click(
-                    cx.listener(|a, _, _, cx| {
-                        let Some(Modal::Panel(Panel::Templates { name, body, .. })) = &a.modal else { return };
-                        let (n, bd) = (name.read(cx).text(), body.read(cx).text());
-                        if n.trim().is_empty() || bd.trim().is_empty() {
-                            a.toast("请填写模板名称和正文", true, cx);
-                            return;
-                        }
-                        let mut v = load_templates(&a.store);
-                        v.push(Template { name: n.trim().into(), body: bd });
-                        save_templates(&a.store, &v);
-                        a.open_templates(cx);
-                    }),
-                ));
+                b = b.child(div().h(px(1.)).bg(t.border_soft).my(px(8.))).child(field_box(t, f1).child(div().flex_1().child(name.clone()))).child(
+                    div()
+                        .h(px(200.))
+                        .p(px(10.))
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(if f2 { t.accent } else { t.border })
+                        .bg(t.paper)
+                        .text_size(px(13.))
+                        .text_color(t.ink)
+                        .child(tb.clone()),
+                );
+                let footer = modal_footer(t)
+                    .child(div().flex_1())
+                    .child(button("tp-add", t, Kind::Primary, Some("plus"), "添加模板", false).on_click(cx.listener(|a, _, w, cx| a.add_template(w, cx))));
                 modal_shell(t, 620., "回复模板", format!("{} 个", list.len()), close).child(b).child(footer).into_any_element()
             }
         }

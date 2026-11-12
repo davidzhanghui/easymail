@@ -55,11 +55,22 @@ fn main() {
         eprintln!("无法创建数据目录 {}: {e}", dir.display());
         std::process::exit(1);
     }
+    // 上次「从备份恢复」暂存了数据：趁还没打开数据库，把旧数据目录改名保留、换上恢复的数据
+    let restored = match easymail::core::backup_pack::apply_pending(&dir) {
+        Ok(old) => old,
+        Err(e) => {
+            eprintln!("恢复备份失败：{e:#}");
+            None
+        }
+    };
     install_panic_log(&dir);
     // 上次预览附件留下的临时文件
     let _ = std::fs::remove_dir_all(easymail::ui::app::preview_dir());
     easymail::core::logging::init(&dir);
     log::info!("启动 {} {}，数据目录 {}", APP_NAME, easymail::core::config::VERSION, dir.display());
+    if let Some(old) = restored {
+        log::info!("已从备份恢复，旧数据保留在 {}", old.display());
+    }
     let background = std::env::args().any(|a| a == "--background");
     let script = std::env::var("EASYMAIL_SCRIPT").ok();
     if script.is_none() && !macos::single_instance(&dir) {
@@ -124,18 +135,21 @@ fn main() {
             cx.open_url("https://github.com/davidzhanghui/easymail");
         });
         let testing = script.is_some();
-        let bounds = Bounds::centered(None, size(px(1400.), px(880.)), cx);
+        // 恢复上次的窗口位置 / 大小（测试脚本模式不恢复，保证位置固定）
+        let restored = if testing { None } else { ui::window_state::load(eng.store(), cx) };
+        let window_bounds = restored
+            .unwrap_or_else(|| WindowBounds::Windowed(Bounds::centered(None, size(px(ui::window_state::DEFAULT_W), px(ui::window_state::DEFAULT_H)), cx)));
         let rx = std::cell::RefCell::new(Some(rx));
         let window = cx
             .open_window(
                 WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_bounds: Some(window_bounds),
                     titlebar: Some(TitlebarOptions {
                         title: Some(APP_NAME.into()),
                         appears_transparent: true,
                         traffic_light_position: Some(point(px(18.), px(24.))),
                     }),
-                    window_min_size: Some(size(px(1000.), px(600.))),
+                    window_min_size: Some(size(px(ui::window_state::MIN_W), px(ui::window_state::MIN_H))),
                     app_id: Some(BUNDLE_ID.into()),
                     kind: if testing { WindowKind::Floating } else { WindowKind::Normal },
                     ..Default::default()
@@ -153,13 +167,16 @@ fn main() {
                 }
             })
             .ok();
+        let eng_for_close = eng.clone();
         window
             .update(cx, |_, window, cx| {
                 // 关窗口 = 隐藏到菜单栏，后台继续收信；退出走菜单 / 托盘 / ⌘Q
-                window.on_window_should_close(cx, move |_, cx| {
+                window.on_window_should_close(cx, move |window, cx| {
                     if testing {
                         return true;
                     }
+                    // 关窗只是隐藏：趁现在把窗口位置 / 大小存一次
+                    ui::window_state::save(eng_for_close.store(), window.window_bounds());
                     cx.hide();
                     false
                 });

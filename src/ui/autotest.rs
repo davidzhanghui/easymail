@@ -548,6 +548,91 @@ async fn e2e(t: &mut T, cx: &mut AsyncApp) {
     t.key(cx, "escape");
     t.check("Esc 关闭模态", t.until(cx, 3, |a, _| a.modal.is_none()).await);
 
+    // 回复模板：正文是多行大文本框；Tab / Shift-Tab 在「名称 ↔ 正文」之间切换
+    t.with(cx, |a, w, cx| a.open_templates(w, cx));
+    t.wait(cx, 300).await;
+    // (名称是否有焦点, 正文是否有焦点)
+    let focus = |t: &T, cx: &mut AsyncApp| {
+        t.with(cx, |a, w, cx| match &a.modal {
+            Some(Modal::Panel(crate::ui::app::panels::Panel::Templates { name, body, .. })) => {
+                (name.read(cx).is_focused(w), body.focus_handle(cx).is_focused(w))
+            }
+            _ => (false, false),
+        })
+        .unwrap_or((false, false))
+    };
+    t.check("回复模板：打开后焦点在名称", focus(t, cx) == (true, false));
+    t.key(cx, "tab");
+    t.wait(cx, 200).await;
+    t.check("回复模板：Tab 跳到正文", focus(t, cx) == (false, true));
+    t.key(cx, "tab");
+    t.wait(cx, 200).await;
+    t.check("回复模板：正文里 Tab 回到名称", focus(t, cx) == (true, false));
+    t.key(cx, "tab");
+    t.wait(cx, 200).await;
+    t.key(cx, "shift-tab");
+    t.wait(cx, 200).await;
+    t.check("回复模板：Shift-Tab 也在两栏间切换", focus(t, cx) == (true, false));
+    t.shot(cx, "e2e-templates").await;
+    t.key(cx, "escape");
+    t.check("回复模板：Esc 关闭", t.until(cx, 3, |a, _| a.modal.is_none()).await);
+
+    // 完整备份面板：Tab 在两个密码框间切换；两次密码不一致时提示且不继续
+    t.with(cx, |a, w, cx| a.open_backup(w, cx));
+    t.wait(cx, 300).await;
+    let pw_focus = |t: &T, cx: &mut AsyncApp| {
+        t.with(cx, |a, w, cx| match &a.modal {
+            Some(Modal::Panel(crate::ui::app::panels::Panel::Backup { pw, pw2, .. })) => (pw.read(cx).is_focused(w), pw2.read(cx).is_focused(w)),
+            _ => (false, false),
+        })
+        .unwrap_or((false, false))
+    };
+    t.check("备份面板：打开后焦点在密码", pw_focus(t, cx) == (true, false));
+    t.key(cx, "tab");
+    t.wait(cx, 200).await;
+    t.check("备份面板：Tab 跳到确认密码", pw_focus(t, cx) == (false, true));
+    t.with(cx, |a, _, cx| {
+        if let Some(Modal::Panel(crate::ui::app::panels::Panel::Backup { pw, pw2, .. })) = &a.modal {
+            pw.update(cx, |i, cx| i.set_text("abc", cx));
+            pw2.update(cx, |i, cx| i.set_text("abd", cx));
+        }
+    });
+    t.key(cx, "enter");
+    t.wait(cx, 300).await;
+    let err = t
+        .read(cx, |a, _| matches!(&a.modal, Some(Modal::Panel(crate::ui::app::panels::Panel::Backup { error: Some(e), .. })) if e.contains("不一致")))
+        .unwrap_or(false);
+    t.check("备份面板：两次密码不一致时提示", err);
+    t.shot(cx, "e2e-backup-panel").await;
+    t.key(cx, "escape");
+    t.check("备份面板：Esc 关闭", t.until(cx, 3, |a, _| a.modal.is_none()).await);
+
+    // 写信窗口的「模板」菜单：模板很多时菜单限高可滚动，编辑器让出高度，底栏（发送按钮等）不被挤出窗口
+    {
+        use crate::ui::app::panels::{load_templates, save_templates, Template};
+        let saved = t.read(cx, |a, _| load_templates(&a.store)).unwrap_or_default();
+        let many: Vec<Template> = (1..=16).map(|i| Template { name: format!("模板{i}"), body: format!("内容{i}") }).collect();
+        t.with(cx, |a, _, _| save_templates(&a.store, &many));
+        t.with(cx, |a, w, cx| a.compose_new(w, cx));
+        t.wait(cx, 600).await;
+        t.with(cx, |a, _, cx| {
+            if let Some(Modal::Composer(c)) = &a.modal {
+                c.update(cx, |c, cx| c.set_template_menu_for_test(true, cx));
+            }
+        });
+        t.wait(cx, 500).await;
+        t.shot(cx, "e2e-template-menu").await;
+        t.with(cx, |a, _, cx| {
+            if let Some(Modal::Composer(c)) = &a.modal {
+                c.update(cx, |c, cx| c.set_template_menu_for_test(false, cx));
+            }
+        });
+        t.with(cx, |a, _, _| save_templates(&a.store, &saved));
+        t.key(cx, "escape");
+        t.wait(cx, 300).await;
+        t.with(cx, |a, _, _| a.modal = None);
+    }
+
     // 14. Dock 角标与收件箱未读一致
     t.with(cx, |a, _, cx| a.load_meta(cx));
     let unread = t.read(cx, |a, _| crate::core::queries::inbox_unread(&a.store)).unwrap_or(-1);
@@ -673,4 +758,35 @@ async fn images(t: &mut T, cx: &mut AsyncApp) {
     let txt = webview::eval(cx, "document.body.innerText").await.unwrap_or_default();
     t.check("图片：回复正文在", txt.contains("收到，图片看得到"));
     t.shot(cx, "e2e-13-image-reply-read").await;
+
+    // 会话时间线：发给自己的信，发件箱和收件箱各一份，所以原信和回复各 2 封，共 4 封，按时间从旧到新；[ ] 能在会话内跳转
+    let thread = t.read(cx, |a, _| a.detail.as_ref().map(|d| (d.id, d.thread.iter().map(|x| (x.id, x.subject.clone())).collect::<Vec<_>>()))).flatten();
+    let (cur, items) = thread.unwrap_or_default();
+    let pos = items.iter().position(|x| x.0 == cur);
+    t.check(
+        &format!("会话时间线：含原信和回复，当前在其中，由旧到新 {items:?}"),
+        items.len() == 4 && pos.is_some() && items.iter().take(2).all(|x| x.1 == "图片渲染测试") && items.iter().skip(2).all(|x| x.1 == "Re: 图片渲染测试"),
+    );
+    // 往前跳一封
+    if let Some(pos) = pos.filter(|p| *p > 0) {
+        let prev = items[pos - 1].0;
+        t.with(cx, |a, _, cx| a.go_in_thread(-1, cx));
+        t.check(
+            "会话时间线：上一封跳到前一封",
+            t.until(cx, 20, move |a, _| a.detail_state == DetailState::Ready && a.detail.as_ref().is_some_and(|d| d.id == prev)).await,
+        );
+        // 再跳回来
+        t.with(cx, |a, _, cx| a.go_in_thread(1, cx));
+        t.check(
+            "会话时间线：下一封跳回来",
+            t.until(cx, 20, move |a, _| a.detail_state == DetailState::Ready && a.detail.as_ref().is_some_and(|d| d.id == cur)).await,
+        );
+    }
+    // 在第一封上再往前：原地不动
+    let first = items.first().map(|x| x.0).unwrap_or(0);
+    t.with(cx, |a, _, cx| a.open_message(first, cx));
+    t.until(cx, 20, move |a, _| a.detail_state == DetailState::Ready && a.detail.as_ref().is_some_and(|d| d.id == first)).await;
+    t.with(cx, |a, _, cx| a.go_in_thread(-1, cx));
+    t.wait(cx, 300).await;
+    t.check("会话时间线：已在第一封时不再往前", t.read(cx, |a, _| a.detail.as_ref().is_some_and(|d| d.id == first)).unwrap_or(false));
 }

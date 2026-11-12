@@ -215,6 +215,10 @@ pub struct ThreadItem {
     pub from: Addr,
     pub date: i64,
     pub folder: String,
+    /// 所在文件夹的角色（inbox / sent / trash …），会话级操作用它决定哪些信可以动
+    pub role: String,
+    pub seen: bool,
+    pub snippet: String,
 }
 
 /// 读信详情

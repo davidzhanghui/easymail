@@ -536,18 +536,23 @@ pub fn detail(store: &Store, id: i64) -> Result<Option<Detail>> {
         }
     }
     if !thread.is_empty() {
+        // 整个会话（含当前这封），按时间从旧到新：阅读区的会话时间线用
         let mut st = c.prepare(
-            "SELECT m.id, m.subject, m.from_name, m.from_addr, m.date, f.role, f.name FROM messages m JOIN folders f ON f.id = m.folder_id
-             WHERE m.account_id = ? AND m.thread = ? AND m.id != ? ORDER BY m.date LIMIT 50",
+            "SELECT m.id, m.subject, m.from_name, m.from_addr, m.date, f.role, f.name, m.seen, m.snippet FROM messages m JOIN folders f ON f.id = m.folder_id
+             WHERE m.account_id = ? AND m.thread = ? ORDER BY m.date, m.id LIMIT 100",
         )?;
         d.thread = st
-            .query_map(rusqlite::params![d.account_id, thread, d.id], |r| {
+            .query_map(rusqlite::params![d.account_id, thread], |r| {
+                let role: String = r.get(5)?;
                 Ok(ThreadItem {
                     id: r.get(0)?,
                     subject: r.get(1)?,
                     from: Addr { name: r.get(2)?, address: r.get(3)? },
                     date: r.get(4)?,
-                    folder: folder_label(&r.get::<_, String>(5)?, &r.get::<_, String>(6)?),
+                    folder: folder_label(&role, &r.get::<_, String>(6)?),
+                    role,
+                    seen: r.get::<_, i64>(7)? != 0,
+                    snippet: r.get(8)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -836,9 +841,14 @@ pub(crate) mod tests {
         assert!(p2.next.is_none());
         // 详情 + 会话
         let d = detail(&s, 3).unwrap().unwrap();
-        assert_eq!(d.thread.iter().map(|t| t.id).collect::<Vec<_>>(), vec![2]);
+        // 会话含当前这封，按时间从旧到新
+        assert_eq!(d.thread.iter().map(|t| t.id).collect::<Vec<_>>(), vec![2, 3]);
         let d2 = detail(&s, 2).unwrap().unwrap();
-        assert_eq!(d2.thread.iter().map(|t| t.id).collect::<Vec<_>>(), vec![3]);
+        assert_eq!(d2.thread.iter().map(|t| t.id).collect::<Vec<_>>(), vec![2, 3]);
+        assert_eq!(d2.thread.iter().map(|t| (t.role.as_str(), t.seen)).collect::<Vec<_>>().len(), 2);
+        // 没有 References / Message-ID 关联的信，会话里只有它自己
+        let solo = detail(&s, 4).unwrap().unwrap();
+        assert_eq!(solo.thread.iter().map(|t| t.id).collect::<Vec<_>>(), vec![4]);
         assert_eq!(d2.folder_label, "收件箱");
         // 统计
         let st = stats(&s).unwrap();

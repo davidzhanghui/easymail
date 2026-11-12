@@ -222,7 +222,8 @@ fn end_to_end_against_greenmail() {
     assert_eq!(d.attachments.iter().filter(|a| !a.inline).count(), 1);
     let t = queries::detail(&store, third).unwrap().unwrap();
     assert!(t.answered);
-    assert_eq!(t.thread.iter().map(|x| x.id).collect::<Vec<_>>(), vec![sent_ids[0]], "回复与原信归为一个会话");
+    // 会话含当前这封，按时间从旧到新：原信在前，回复在后
+    assert_eq!(t.thread.iter().map(|x| x.id).collect::<Vec<_>>(), vec![third, sent_ids[0]], "回复与原信归为一个会话");
 
     // ⑥ 按需取正文（清掉本地缓存再打开）
     let p = store.eml_abs(me.id, third);

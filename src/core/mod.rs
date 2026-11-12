@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod archive;
+pub mod backup_pack;
 pub mod config;
 pub mod crypto;
 pub mod db;

@@ -408,30 +408,91 @@ impl MailApp {
             footer = footer.child(div().text_size(px(11.)).text_color(t.muted).child(format!("附  件 · {}", files.len()))).child(row);
         }
         if d.thread.len() > 1 {
-            let mut list = div().id("thread").flex().flex_col().max_h(px(130.)).overflow_y_scroll();
+            let n = d.thread.len();
+            let pos = d.thread.iter().position(|t| t.id == id).unwrap_or(0);
+            let archive_ids = if has_archive { self.thread_ids(&d, true) } else { vec![] };
+            let delete_ids = self.thread_ids(&d, false);
+            let all_ids: Vec<i64> = d.thread.iter().map(|t| t.id).collect();
+            let any_unread = d.thread.iter().any(|t| !t.seen && t.id != id);
+            let tbtn = |bid: &'static str, label: &'static str, off: bool| disabled(button(bid, t, Kind::Ghost, None, label, true), off);
+            let head = div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(2.))
+                .child(div().flex_1().min_w(px(80.)).text_size(px(11.)).text_color(t.muted).child(format!("同一会话 · 第 {} / {} 封", pos + 1, n)))
+                .child(tbtn("th-prev", "上一封 [", pos == 0).on_click(cx.listener(|a, _, _, cx| a.go_in_thread(-1, cx))))
+                .child(tbtn("th-next", "下一封 ]", pos + 1 >= n).on_click(cx.listener(|a, _, _, cx| a.go_in_thread(1, cx))))
+                .child(tbtn("th-read", "全部已读", !any_unread).on_click(cx.listener(move |a, _, _, cx| a.set_seen(all_ids.clone(), true, cx))))
+                .child(
+                    tbtn("th-arch", "归档会话", archive_ids.is_empty())
+                        .on_click(cx.listener(move |a, _, _, cx| a.to_role(archive_ids.clone(), "archive", "已归档会话", cx))),
+                )
+                .child(tbtn("th-del", "删除会话", delete_ids.is_empty()).on_click(cx.listener(move |a, _, w, cx| a.delete(delete_ids.clone(), w, cx))));
+            if self.thread_scrolled != Some(id) {
+                self.thread_scrolled = Some(id);
+                self.thread_scroll.scroll_to_item(pos);
+            }
+            let mut list = div().id("thread").flex().flex_col().gap(px(2.)).max_h(px(168.)).overflow_y_scroll().track_scroll(&self.thread_scroll);
             for th in d.thread.iter() {
                 let tid = th.id;
                 let cur = tid == id;
+                // 当前这封正在阅读，必然是已读（库里的 seen 可能还没刷新）
+                let unread = !th.seen && !cur;
                 list = list.child(
                     div()
                         .id(("th", tid as u64))
                         .flex()
-                        .items_center()
-                        .gap(px(10.))
-                        .h(px(28.))
-                        .px(px(8.))
-                        .rounded(px(6.))
-                        .text_size(px(12.5))
+                        .items_start()
+                        .gap(px(8.))
+                        .px(px(10.))
+                        .py(px(6.))
+                        .rounded(px(7.))
                         .cursor_pointer()
+                        .border_l_2()
+                        .border_color(if cur { t.accent } else { gpui::transparent_black() })
                         .when(cur, |x| x.bg(t.accent_soft))
-                        .hover(|s| s.bg(t.row_hover))
-                        .child(icon("mail", 13., t.muted))
-                        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(format!(
-                            "{} · {}",
-                            th.from.short(),
-                            th.subject
-                        )))
-                        .child(div().text_size(px(11.)).text_color(t.muted).child(format!("{} · {}", th.folder, fmt_full(th.date))))
+                        .hover(|s| s.bg(if cur { t.accent_soft } else { t.row_hover }))
+                        .child(div().mt(px(6.)).size(px(7.)).flex_none().rounded_full().when(unread, |x| x.bg(t.accent)))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(8.))
+                                        .text_size(px(12.5))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .text_ellipsis()
+                                                .text_color(t.ink)
+                                                .when(unread, |x| x.font_weight(FontWeight::SEMIBOLD))
+                                                .child(th.from.short().to_string()),
+                                        )
+                                        .child(div().flex_none().text_size(px(11.)).text_color(t.muted).child(format!(
+                                            "{} · {}",
+                                            th.folder,
+                                            fmt_full(th.date)
+                                        ))),
+                                )
+                                .child(
+                                    div()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .text_size(px(12.))
+                                        .text_color(t.muted)
+                                        .child(if th.snippet.trim().is_empty() { th.subject.clone() } else { one_line(&th.snippet, 120) }),
+                                ),
+                        )
                         .on_click(cx.listener(move |a, _, _, cx| {
                             if !cur {
                                 a.open_message(tid, cx)
@@ -439,7 +500,7 @@ impl MailApp {
                         })),
                 );
             }
-            footer = footer.child(div().text_size(px(11.)).text_color(t.muted).child(format!("同一会话 · {} 封", d.thread.len()))).child(list);
+            footer = footer.child(head).child(list);
         }
 
         let card = div()
@@ -519,5 +580,33 @@ fn or_dash(s: &str) -> &str {
         "—"
     } else {
         s
+    }
+}
+
+// ───────────────────────── 会话时间线 ─────────────────────────
+
+/// 会话级「归档 / 删除」不动的文件夹：已发送、草稿、垃圾箱、垃圾邮件（删除时）、已归档（归档时）
+fn thread_actionable(role: &str, archive: bool) -> bool {
+    !matches!(role, "sent" | "drafts" | "trash" | "junk") && !(archive && role == "archive")
+}
+
+impl MailApp {
+    /// 在当前会话里跳到上一封 / 下一封（快捷键 [ ]）
+    pub fn go_in_thread(&mut self, step: i32, cx: &mut Context<Self>) {
+        let Some(d) = self.detail.clone().filter(|_| self.detail_state == DetailState::Ready) else { return };
+        let Some(pos) = d.thread.iter().position(|t| t.id == d.id) else { return };
+        let to = pos as i32 + step;
+        if to < 0 || to as usize >= d.thread.len() {
+            return;
+        }
+        self.open_message(d.thread[to as usize].id, cx);
+    }
+
+    /// 会话里可以被归档的邮件 id（排除已发送 / 草稿 / 垃圾箱 / 已在归档里的；本地归档账号不动）
+    fn thread_ids(&self, d: &Detail, archive: bool) -> Vec<i64> {
+        if d.account_local {
+            return vec![];
+        }
+        d.thread.iter().filter(|t| thread_actionable(&t.role, archive)).map(|t| t.id).collect()
     }
 }

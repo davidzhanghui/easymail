@@ -28,6 +28,7 @@ pub(crate) mod panels;
 mod pop;
 pub(crate) mod reader;
 mod sidebar;
+use sidebar::{Sidebar, SidebarEvent};
 
 const PAGE: usize = 60;
 const ROW_H: f32 = 84.;
@@ -172,13 +173,21 @@ pub struct MailApp {
     pub detail_state: DetailState,
     pub remote_ok: HashSet<i64>,
     pub text_mode: bool,
-    collapsed: HashSet<i64>,
+    sidebar: Entity<Sidebar>,
+    /// 阅读区会话时间线的滚动句柄，以及已经为哪一封滚动过（换信时把当前这封滚进可视区）
+    thread_scroll: ScrollHandle,
+    thread_scrolled: Option<i64>,
+    /// 命令面板列表的滚动句柄（↑↓ 选择时让选中项保持可见）
+    palette_scroll: ScrollHandle,
     pub sync: HashMap<i64, SyncState>,
     pub toasts: Vec<Toast>,
     toast_seq: u64,
     pub pop: Option<(Pop, Point<Pixels>)>,
     pop_closed_at: Instant,
     sidebar_w: f32,
+    /// 上次看到的窗口位置 / 大小，以及是否已有一个防抖保存在排队
+    win_seen: Option<WindowBounds>,
+    win_save_pending: bool,
     list_w: f32,
     /// 正在拖拽的分隔条：0 = 侧栏 | 列表，1 = 列表 | 阅读区
     resizing: Option<u8>,
@@ -229,12 +238,41 @@ impl MailApp {
             InputEvent::Submit { .. } | InputEvent::Down => window.focus(&this.focus),
             _ => {}
         })];
+        // 侧栏是独立 Entity：它只发事件，这里统一处理
+        let me = cx.entity();
+        let sidebar = cx.new(|scx| Sidebar::new(&me, store.clone(), scx));
+        subs.push(cx.subscribe_in(&sidebar, window, |this: &mut Self, _, ev: &SidebarEvent, window, cx| match ev {
+            SidebarEvent::View(v) => {
+                if !this.q.is_empty() {
+                    this.q.clear();
+                    this.search.update(cx, |s, cx| s.set_text("", cx));
+                }
+                this.set_nav(Nav::View(*v), cx);
+                window.focus(&this.focus);
+            }
+            SidebarEvent::Saved(q) => {
+                this.search.update(cx, |s, cx| s.set_text(q, cx));
+                this.set_query(q.clone(), cx);
+                window.focus(&this.focus);
+            }
+            SidebarEvent::Folder(id) => {
+                this.set_nav(Nav::Folder(*id), cx);
+                window.focus(&this.focus);
+            }
+            SidebarEvent::AccountMenu(id, at) => this.toggle_pop(Pop::Account(*id), *at, cx),
+            SidebarEvent::FolderMenu(id, at) => this.toggle_pop(Pop::Folder(*id), *at, cx),
+            SidebarEvent::Sync(id) => {
+                this.eng.request_sync(*id, None, true);
+                this.toast("已开始同步", false, cx);
+            }
+            SidebarEvent::Import => this.open_import(window, cx),
+            SidebarEvent::Settings => this.open_accounts(Tab::Accounts, false, window, cx),
+        }));
         subs.push(cx.observe_window_appearance(window, |this: &mut Self, window, cx| {
             if this.pref.pref == "auto" {
                 this.apply_theme(window.appearance(), cx);
             }
         }));
-        let collapsed = store.get_kv("collapsed").and_then(|s| serde_json::from_str::<Vec<i64>>(&s).ok()).unwrap_or_default().into_iter().collect();
         let mut tasks = vec![];
         // 引擎事件 → 界面
         let mut rx = rx;
@@ -308,13 +346,18 @@ impl MailApp {
             detail_state: DetailState::Idle,
             remote_ok: HashSet::new(),
             text_mode: false,
-            collapsed,
+            sidebar,
+            thread_scroll: ScrollHandle::new(),
+            thread_scrolled: None,
+            palette_scroll: ScrollHandle::new(),
             sync: HashMap::new(),
             toasts: vec![],
             toast_seq: 0,
             pop: None,
             pop_closed_at: Instant::now(),
             sidebar_w: layout.0,
+            win_seen: None,
+            win_save_pending: false,
             list_w: layout.1,
             resizing: None,
             reader_collapsed: layout.2,
@@ -684,6 +727,30 @@ impl MailApp {
         if self.resizing.take().is_some() {
             self.save_layout();
         }
+    }
+
+    /// 窗口移动 / 缩放都会触发重绘：在渲染时比较一下，变了就防抖保存（GPUI 没有 bounds 变化回调）
+    fn track_window(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let now = window.window_bounds();
+        if self.win_seen == Some(now) {
+            return;
+        }
+        self.win_seen = Some(now);
+        if self.win_save_pending {
+            return;
+        }
+        self.win_save_pending = true;
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            cx.background_executor().timer(Duration::from_millis(600)).await;
+            this.update(cx, |a, _| {
+                a.win_save_pending = false;
+                if let Some(wb) = a.win_seen {
+                    super::window_state::save(&a.store, wb);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub fn save_layout(&self) {
@@ -1735,9 +1802,10 @@ fn empty_list(t: &Theme, s: &str) -> impl IntoElement {
 impl Render for MailApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
+        self.track_window(window, cx);
         self.sync_freeze(cx);
         let header = self.render_header(&t, window, cx);
-        let sidebar = self.render_sidebar(&t, cx);
+        let sidebar = self.sidebar.clone();
         let list = self.render_list(&t, cx);
         let reader = if self.reader_collapsed {
             webview::hide();
@@ -1840,6 +1908,8 @@ impl Render for MailApp {
                     .track_focus(&self.focus)
                     .on_action(cx.listener(|a, _: &NextMail, _, cx| a.go(1, cx)))
                     .on_action(cx.listener(|a, _: &PrevMail, _, cx| a.go(-1, cx)))
+                    .on_action(cx.listener(|a, _: &NextInThread, _, cx| a.go_in_thread(1, cx)))
+                    .on_action(cx.listener(|a, _: &PrevInThread, _, cx| a.go_in_thread(-1, cx)))
                     .on_action(cx.listener(|a, _: &Reply, w, cx| a.reply("reply", w, cx)))
                     .on_action(cx.listener(|a, _: &ReplyAll, w, cx| a.reply("replyAll", w, cx)))
                     .on_action(cx.listener(|a, _: &Forward, w, cx| a.reply("forward", w, cx)))

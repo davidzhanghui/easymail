@@ -925,6 +925,13 @@ impl Composer {
         self.touch(cx);
     }
 
+    /// 仅供界面端到端测试：打开 / 关闭「模板」菜单
+    pub fn set_template_menu_for_test(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.template_menu = on;
+        self.schedule_menu = false;
+        cx.notify();
+    }
+
     fn render_addr(&self, t: &Theme, f: Field, label: &'static str, window: &Window, cx: &mut Context<Self>) -> Div {
         let input = self.input_of(f).clone();
         let focused = input.read(cx).is_focused(window);
@@ -1091,7 +1098,8 @@ impl Render for Composer {
             .id("compose-body")
             .track_focus(&self.body_focus)
             .flex_1()
-            .min_h(px(240.))
+            // 模板 / 定时菜单在底栏上方占位（不能盖在原生编辑器上），编辑器要让出高度，否则底栏会被挤出窗口
+            .min_h(px(if self.template_menu || self.schedule_menu { 90. } else { 240. }))
             .mt(px(12.))
             .mx(px(22.))
             .p(px(2.))
@@ -1223,6 +1231,8 @@ impl Render for Composer {
             .when(self.template_menu, |d| {
                 let list = crate::ui::app::panels::load_templates(self.eng.store());
                 let mut menu = div()
+                    .id("tpl-menu")
+                    .flex_none()
                     .mx(px(22.))
                     .mb(px(8.))
                     .flex()
@@ -1230,6 +1240,8 @@ impl Render for Composer {
                     .items_center()
                     .gap(px(2.))
                     .p(px(6.))
+                    .max_h(px(112.))
+                    .overflow_y_scroll()
                     .rounded(px(10.))
                     .bg(t.panel)
                     .border_1()

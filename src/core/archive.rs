@@ -25,7 +25,7 @@ pub struct BackupReport {
     pub problems: Vec<String>,
 }
 
-fn copy_dir(src: &Path, dst: &Path, bytes: &mut u64, n: &mut usize) -> Result<()> {
+pub(crate) fn copy_dir(src: &Path, dst: &Path, bytes: &mut u64, n: &mut usize) -> Result<()> {
     if !src.exists() {
         return Ok(());
     }

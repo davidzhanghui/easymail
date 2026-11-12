@@ -13,6 +13,7 @@ pub mod palettes;
 pub mod text_area;
 pub mod theme;
 pub mod widgets;
+pub mod window_state;
 
 use gpui::*;
 use std::borrow::Cow;
@@ -224,6 +225,8 @@ actions!(
         OpenImport,
         NextMail,
         PrevMail,
+        NextInThread,
+        PrevInThread,
         Reply,
         ReplyAll,
         Forward,
@@ -259,6 +262,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("down", NextMail, Some("MailList")),
         KeyBinding::new("k", PrevMail, Some("MailList")),
         KeyBinding::new("up", PrevMail, Some("MailList")),
+        // 会话内上一封 / 下一封
+        KeyBinding::new("[", PrevInThread, Some("MailList")),
+        KeyBinding::new("]", NextInThread, Some("MailList")),
         KeyBinding::new("c", Compose, Some("MailList")),
         KeyBinding::new("r", Reply, Some("MailList")),
         KeyBinding::new("a", ReplyAll, Some("MailList")),

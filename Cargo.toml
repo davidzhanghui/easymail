@@ -57,6 +57,8 @@ aes-gcm = "0.10"
 sha2 = "0.10"
 # 更新包 Ed25519 验签（rustls 已经带了 ring，不增加新的编译依赖）
 ring = "0.17"
+# 加密备份打包成单个文件
+tar = "0.4"
 
 # macOS 原生：WKWebView、Dock 角标、托盘、通知
 objc2 = "0.6"

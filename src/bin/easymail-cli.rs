@@ -65,7 +65,11 @@ fn main() {
             }
             "backup" => {
                 let dest = std::path::PathBuf::from(args.get(1).cloned().unwrap_or_else(|| usage()));
-                let rep = archive::backup(&store, &dest)?;
+                // 密码从环境变量读，避免出现在进程列表里；设置了就生成 .embak 加密文件
+                let rep = match std::env::var("EASYMAIL_BACKUP_PASSWORD").ok().filter(|p| !p.is_empty()) {
+                    Some(pw) => easymail::core::backup_pack::backup_encrypted(&store, &dest, &pw)?,
+                    None => archive::backup(&store, &dest)?,
+                };
                 println!(
                     "备份完成：{}\n邮件 {} 封，正文文件 {} 个，{}",
                     rep.dir.display(),
