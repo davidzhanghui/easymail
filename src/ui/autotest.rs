@@ -668,12 +668,13 @@ async fn e2e(t: &mut T, cx: &mut AsyncApp) {
         let wid = wins.last().map(|w| w.window_id().as_u64()).unwrap_or(0);
         t.check("多窗口：新窗口有自己的 WebView", crate::webview::is_live_in(wid));
         t.check("多窗口：不影响主窗口状态", !wins.is_empty());
+        // Esc 关闭新窗口
         if let Some(w) = wins.last() {
-            let _ = cx.update(|cx| w.update(cx, |_, window, _| window.remove_window()));
+            let _ = cx.update_window(*w, |_, window, cx| window.dispatch_keystroke(Keystroke::parse("escape").expect("keystroke"), cx));
         }
         t.wait(cx, 300).await;
         crate::webview::hide_in(wid);
-        t.check("多窗口：关闭后窗口数恢复", cx.update(|cx| cx.windows().len()).unwrap_or(0) == before);
+        t.check("多窗口：Esc 关闭新窗口", cx.update(|cx| cx.windows().len()).unwrap_or(0) == before);
     }
 
     // 联系人：列表有往来的人；新建时 Tab 在各栏间切换；保存后能搜到

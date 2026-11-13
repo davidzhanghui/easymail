@@ -19,6 +19,7 @@ pub struct ReaderWindow {
     d: Detail,
     store: Store,
     wid: u64,
+    focus: FocusHandle,
     text_mode: bool,
     /// 这封信临时放行远程图片
     remote_ok: bool,
@@ -44,8 +45,16 @@ pub fn open(store: &Store, id: i64, cx: &mut App) -> anyhow::Result<()> {
         },
         move |window, cx| {
             let wid = window.window_handle().window_id().as_u64();
-            let view =
-                cx.new(|_| ReaderWindow { has_remote: webview::has_remote_content(&d.html), d, store, wid, text_mode: false, remote_ok: false, doc: None });
+            let view = cx.new(|cx| ReaderWindow {
+                focus: cx.focus_handle(),
+                has_remote: webview::has_remote_content(&d.html),
+                d,
+                store,
+                wid,
+                text_mode: false,
+                remote_ok: false,
+                doc: None,
+            });
             // 点正文里的链接：导航代理记下来，这里轮询取走
             let weak = view.downgrade();
             window
@@ -64,6 +73,8 @@ pub fn open(store: &Store, id: i64, cx: &mut App) -> anyhow::Result<()> {
                 })
                 .detach();
             // 窗口关闭时释放它的 WKWebView
+            let focus = view.read(cx).focus.clone();
+            window.focus(&focus);
             window.on_window_should_close(cx, move |_, _| {
                 webview::hide_in(wid);
                 true
@@ -121,6 +132,15 @@ impl Render for ReaderWindow {
         let files: Vec<String> = d.attachments.iter().filter(|a| !a.inline).map(|a| format!("{}（{}）", a.filename, fmt_size(a.size))).collect();
         div()
             .size_full()
+            .track_focus(&self.focus)
+            // Esc / ⌘W 关闭这个窗口
+            .on_key_down(cx.listener(|_, ev: &KeyDownEvent, window, _| {
+                let k = &ev.keystroke;
+                if k.key == "escape" || (k.key == "w" && k.modifiers.platform) {
+                    webview::hide_in(window.window_handle().window_id().as_u64());
+                    window.remove_window();
+                }
+            }))
             .flex()
             .flex_col()
             .bg(t.bg)
