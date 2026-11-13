@@ -4,17 +4,12 @@ use super::*;
 
 impl MailApp {
     pub(super) fn render_modal(&mut self, t: &Theme, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        // 注意：写信有自己的窗口，编辑器由那个窗口管理，这里不能 hide（会误关正在写的信）
         let Some(modal) = self.modal.as_ref() else {
             webview::hide_quicklook();
-            crate::editor::hide();
             return None;
         };
-        if !matches!(modal, Modal::Composer(_)) {
-            crate::editor::hide();
-        }
-        // 附件预览（弹窗，或写信窗口里的原地预览）之外不保留原生预览视图
-        let composer_preview = matches!(modal, Modal::Composer(c) if c.read(cx).has_preview());
-        if !matches!(modal, Modal::Preview { .. }) && !composer_preview {
+        if !matches!(modal, Modal::Preview { .. }) {
             webview::hide_quicklook();
         }
         let (inner, overlay_close): (AnyElement, bool) = match modal {
@@ -60,7 +55,6 @@ impl MailApp {
                 )
             }
             Modal::Panel(_) => (self.render_panel(t, window, cx), true),
-            Modal::Composer(c) => (c.clone().into_any_element(), false),
             Modal::Accounts(m) => (m.clone().into_any_element(), true),
             Modal::Import(m) => (m.clone().into_any_element(), !m.read(cx).busy()),
             Modal::Prompt { title, input, .. } => {

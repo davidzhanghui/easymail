@@ -5,8 +5,15 @@
 //! - 离线发送：连接类错误不算失败，按 1 / 2 / 5 / 15 / 30 分钟退避重试，联网后自动发出
 //! - 服务器明确拒绝（认证失败、收件人被拒等）：标为 failed，提示用户，信留在发件箱里可以重试或撤回编辑
 //!
-//! 状态：queued（等待）→ sending（发送中）→ 成功即删除；失败为 failed。进程在 sending 时退出，
-//! 下次启动按 queued 处理（SMTP 没有幂等性，极端情况下可能重复发送一次，比丢信好）。
+//! 状态：queued（等待）→ sending（发送中）→ accepted（服务器已收下，正在存「已发送」等收尾）→ 删除；
+//! 失败为 failed。
+//!
+//! 防重发（SMTP 没有幂等性）：
+//! - 每封信入队时就固定 Message-ID，重试沿用同一个
+//! - 服务器一回 250 就把状态记成 accepted；之后进程被杀，重启时直接当作已发出，不会再发
+//! - 进程在 sending 时退出、或正文写完后等回应时断线（`smtp::MaybeDelivered`）：记 uncertain，
+//!   下次发之前先去服务器「已发送」里按 Message-ID 查，查到了就当作已发出
+//! - 仍然查不到（服务商不自动存「已发送」、而上次又恰好死在 250 之前的一瞬间）才会重发，比丢信好
 
 use super::db::{now_ms, Store};
 use super::engine::Engine;
@@ -41,6 +48,12 @@ pub fn enqueue(store: &Store, o: &Outgoing, send_at: Option<i64>) -> Result<i64>
         bail!("请填写收件人");
     }
     let at = send_at.unwrap_or_else(|| now_ms() + undo_secs(store) * 1000);
+    let mut o = o.clone();
+    if o.message_id.trim().is_empty() {
+        let email: String = store.r().query_row("SELECT email FROM accounts WHERE id = ?", [o.account_id], |r| r.get(0)).optional()?.unwrap_or_default();
+        o.message_id = mailer::new_message_id(&email);
+    }
+    let o = &o;
     let rcpt = [o.to.as_str(), o.cc.as_str(), o.bcc.as_str()].iter().filter(|s| !s.trim().is_empty()).cloned().collect::<Vec<_>>().join(", ");
     let c = store.w();
     c.execute(
@@ -78,6 +91,7 @@ pub fn cancel(store: &Store, id: i64) -> Result<Option<i64>> {
     match row {
         None => bail!("这封信已经发出"),
         Some((st, _)) if st == "sending" => bail!("正在发送，来不及撤回了"),
+        Some((st, _)) if st == "accepted" => bail!("这封信已经发出"),
         Some((_, draft)) => {
             c.execute("DELETE FROM outbox WHERE id = ?", [id])?;
             Ok(draft)
@@ -87,27 +101,52 @@ pub fn cancel(store: &Store, id: i64) -> Result<Option<i64>> {
 
 /// 失败的信重新排队（立即发送）
 pub fn retry(store: &Store, id: i64) -> Result<()> {
-    store.w().execute("UPDATE outbox SET state = 'queued', send_at = ?, last_error = '' WHERE id = ? AND state != 'sending'", params![now_ms(), id])?;
+    store
+        .w()
+        .execute("UPDATE outbox SET state = 'queued', send_at = ?, last_error = '' WHERE id = ? AND state IN ('queued', 'failed')", params![now_ms(), id])?;
     Ok(())
 }
 
-/// 进程上次在 sending 时退出：恢复成 queued
-pub fn recover(store: &Store) {
-    let _ = store.w().execute("UPDATE outbox SET state = 'queued' WHERE state = 'sending'", []);
+/// 启动时整理上次没走完的信，返回「其实已经发出」的封数：
+/// - accepted：服务器已经收下，只是收尾没做完 → 直接删掉，不再发
+/// - sending：不知道服务器收没收到 → 回到 queued 并记 uncertain，发之前先核对「已发送」
+pub fn recover(store: &Store) -> usize {
+    let c = store.w();
+    let done = c.execute("DELETE FROM outbox WHERE state = 'accepted'", []).unwrap_or(0);
+    if done > 0 {
+        log::info!("[outbox] 上次退出时有 {done} 封已被服务器收下、收尾未完成，按已发出处理");
+    }
+    let _ = c.execute("UPDATE outbox SET state = 'queued', uncertain = 1 WHERE state = 'sending'", []);
+    done
 }
 
 /// 取一封到点的信并标记为 sending（原子操作，避免并发重复发送）
-fn claim(store: &Store) -> Result<Option<(i64, Outgoing, i64)>> {
+struct Claimed {
+    id: i64,
+    o: Outgoing,
+    attempts: i64,
+    uncertain: bool,
+}
+
+fn claim(store: &Store) -> Result<Option<Claimed>> {
     let c = store.w();
-    let row: Option<(i64, String, i64)> = c
-        .query_row("SELECT id, payload, attempts FROM outbox WHERE state = 'queued' AND send_at <= ? ORDER BY send_at LIMIT 1", [now_ms()], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+    let row: Option<(i64, String, i64, bool)> = c
+        .query_row("SELECT id, payload, attempts, uncertain FROM outbox WHERE state = 'queued' AND send_at <= ? ORDER BY send_at LIMIT 1", [now_ms()], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })
         .optional()?;
-    let Some((id, payload, attempts)) = row else { return Ok(None) };
+    let Some((id, payload, attempts, uncertain)) = row else { return Ok(None) };
     c.execute("UPDATE outbox SET state = 'sending', attempts = attempts + 1 WHERE id = ?", [id])?;
     match serde_json::from_str::<Outgoing>(&payload) {
-        Ok(o) => Ok(Some((id, o, attempts))),
+        Ok(mut o) => {
+            // 旧版本入队的信没有固定 Message-ID：补一个并写回，之后的重试都沿用
+            if o.message_id.trim().is_empty() {
+                let email: String = c.query_row("SELECT email FROM accounts WHERE id = ?", [o.account_id], |r| r.get(0)).optional()?.unwrap_or_default();
+                o.message_id = mailer::new_message_id(&email);
+                c.execute("UPDATE outbox SET payload = ? WHERE id = ?", params![serde_json::to_string(&o)?, id])?;
+            }
+            Ok(Some(Claimed { id, o, attempts, uncertain }))
+        }
         Err(e) => {
             c.execute("UPDATE outbox SET state = 'failed', last_error = ? WHERE id = ?", params![format!("内容损坏：{e}"), id])?;
             Ok(None)
@@ -120,7 +159,7 @@ pub async fn tick(eng: &Engine) -> usize {
     let store = eng.store().clone();
     let mut sent = 0;
     loop {
-        let (id, o, attempts) = match claim(&store) {
+        let Claimed { id, o, attempts, uncertain } = match claim(&store) {
             Ok(Some(x)) => x,
             Ok(None) => break,
             Err(e) => {
@@ -129,7 +168,35 @@ pub async fn tick(eng: &Engine) -> usize {
             }
         };
         let subject = if o.subject.trim().is_empty() { "（无主题）".to_string() } else { o.subject.clone() };
-        match mailer::send(eng.clone(), o).await {
+        if uncertain {
+            match already_sent(eng, &o).await {
+                Ok(true) => {
+                    log::info!("[outbox] 「{subject}」在「已发送」里找到了 {}，不再重发", o.message_id);
+                    let _ = store.w().execute("DELETE FROM outbox WHERE id = ?", [id]);
+                    if let Some(d) = o.draft_id {
+                        let _ = mailer::delete_draft_everywhere(eng, d, true);
+                    }
+                    eng.toast(format!("「{subject}」上次其实已经发出，没有重复发送"), false);
+                    eng.emit(super::engine::Evt::Accounts);
+                    continue;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    // 核对不了（连不上）就先别发，免得重复；按连接错误退避
+                    let wait = RETRY_MIN[(attempts as usize).min(RETRY_MIN.len() - 1)] * 60_000;
+                    let _ = store.w().execute(
+                        "UPDATE outbox SET state = 'queued', send_at = ?, last_error = ? WHERE id = ?",
+                        params![now_ms() + wait, format!("核对是否已发出时失败：{e:#}"), id],
+                    );
+                    break;
+                }
+            }
+        }
+        let st = store.clone();
+        let accepted = move || {
+            let _ = st.w().execute("UPDATE outbox SET state = 'accepted' WHERE id = ?", [id]);
+        };
+        match mailer::send_with(eng.clone(), o, accepted).await {
             Ok(r) => {
                 let _ = store.w().execute("DELETE FROM outbox WHERE id = ?", [id]);
                 sent += 1;
@@ -137,9 +204,11 @@ pub async fn tick(eng: &Engine) -> usize {
             }
             Err(e) if kind_of(&e) == ErrorKind::Connection => {
                 let wait = RETRY_MIN[(attempts as usize).min(RETRY_MIN.len() - 1)] * 60_000;
-                let _ = store
-                    .w()
-                    .execute("UPDATE outbox SET state = 'queued', send_at = ?, last_error = ? WHERE id = ?", params![now_ms() + wait, format!("{e:#}"), id]);
+                let maybe = super::smtp::maybe_delivered(&e);
+                let _ = store.w().execute(
+                    "UPDATE outbox SET state = 'queued', send_at = ?, last_error = ?, uncertain = MAX(uncertain, ?) WHERE id = ?",
+                    params![now_ms() + wait, format!("{e:#}"), maybe, id],
+                );
                 if attempts == 0 {
                     eng.toast(format!("「{subject}」暂时发不出去，已留在发件箱，联网后自动重试（{e:#}）"), true);
                 }
@@ -154,6 +223,19 @@ pub async fn tick(eng: &Engine) -> usize {
         eng.emit(super::engine::Evt::Accounts);
     }
     sent
+}
+
+/// 「已发送」里有没有这封信（按固定的 Message-ID）。账号没有「已发送」文件夹时无从核对，返回 false
+async fn already_sent(eng: &Engine, o: &Outgoing) -> Result<bool> {
+    let mid = o.message_id.trim();
+    if mid.is_empty() {
+        return Ok(false);
+    }
+    let path: Option<String> =
+        eng.store().r().query_row("SELECT path FROM folders WHERE account_id = ? AND role = 'sent'", [o.account_id], |r| r.get(0)).optional()?;
+    let Some(path) = path else { return Ok(false) };
+    let mid = if mid.starts_with('<') { mid.to_string() } else { format!("<{mid}>") };
+    eng.has_message(o.account_id, path, mid).await
 }
 
 #[cfg(test)]
@@ -172,11 +254,42 @@ mod tests {
         assert_eq!(cancel(&s, id).unwrap(), Some(9));
         assert!(list(&s).unwrap().is_empty());
         let id = enqueue(&s, &o, Some(0)).unwrap();
-        let (cid, back, attempts) = claim(&s).unwrap().unwrap();
-        assert_eq!((cid, back.subject.as_str(), attempts), (id, "hi", 0));
+        let c = claim(&s).unwrap().unwrap();
+        assert_eq!((c.id, c.o.subject.as_str(), c.attempts, c.uncertain), (id, "hi", 0, false));
         assert!(cancel(&s, id).is_err(), "发送中不能撤回");
         recover(&s);
-        assert_eq!(list(&s).unwrap()[0].state, "queued");
-        assert_eq!(list(&s).unwrap()[0].attempts, 1);
+        let it = &list(&s).unwrap()[0];
+        assert_eq!((it.state.as_str(), it.attempts), ("queued", 1));
+        let unc: bool = s.r().query_row("SELECT uncertain FROM outbox WHERE id = ?", [id], |r| r.get(0)).unwrap();
+        assert!(unc, "死在「发送中」的重发前要先核对是否已发出");
+    }
+
+    #[test]
+    fn enqueue_fixes_message_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path()).unwrap();
+        s.w().execute("INSERT INTO accounts(id,email,provider,imap_host,smtp_host,secret,created_at) VALUES(1,'a@b.c','custom','h','h','x',0)", []).unwrap();
+        let id = enqueue(&s, &Outgoing { account_id: 1, to: "x@y.z".into(), subject: "hi".into(), ..Default::default() }, Some(0)).unwrap();
+        let c = claim(&s).unwrap().unwrap();
+        assert_eq!(c.id, id);
+        assert!(c.o.message_id.ends_with("@b.c"), "入队时按发件域名生成固定的 Message-ID：{}", c.o.message_id);
+        // 重试沿用同一个
+        recover(&s);
+        let c2 = claim(&s).unwrap().unwrap();
+        assert_eq!(c2.o.message_id, c.o.message_id);
+    }
+
+    #[test]
+    fn accepted_is_not_resent() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path()).unwrap();
+        s.w().execute("INSERT INTO accounts(id,email,provider,imap_host,smtp_host,secret,created_at) VALUES(1,'a@b.c','custom','h','h','x',0)", []).unwrap();
+        let id = enqueue(&s, &Outgoing { account_id: 1, to: "x@y.z".into(), subject: "hi".into(), ..Default::default() }, Some(0)).unwrap();
+        let _ = claim(&s).unwrap().unwrap();
+        // 服务器回了 250、状态记成 accepted，随后进程被杀
+        s.w().execute("UPDATE outbox SET state = 'accepted' WHERE id = ?", [id]).unwrap();
+        assert_eq!(recover(&s), 1);
+        assert!(list(&s).unwrap().is_empty(), "已收下的信重启后不能重发");
+        assert!(claim(&s).unwrap().is_none());
     }
 }

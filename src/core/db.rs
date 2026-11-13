@@ -275,6 +275,9 @@ pub const MIGRATIONS: &[&str] = &[
        starred    INTEGER NOT NULL DEFAULT 0,
        created_at INTEGER NOT NULL DEFAULT 0
      );",
+    // 18：发件箱防重发。uncertain = 1 表示上一次尝试可能已经被服务器收下（进程在发送中退出、
+    //     或 DATA 写完后等回应时断线），重发前先去「已发送」按 Message-ID 查一遍
+    "ALTER TABLE outbox ADD COLUMN uncertain INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// 二元组索引是否已覆盖全部老数据（没补完时两字词搜索退回 LIKE，结果不缺）

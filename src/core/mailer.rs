@@ -367,6 +367,7 @@ pub async fn sync_draft(eng: Engine, id: i64) -> Result<bool> {
         source_id: d.source_id,
         include_original: false,
         draft_id: Some(id),
+        ..Default::default()
     };
     let built = build_draft(&store, &acc, &o)?;
     let old_mid = old.filter(|(a, _)| *a == acc.id).map(|(_, m)| m).unwrap_or_default();
@@ -500,6 +501,16 @@ pub struct Outgoing {
     pub source_id: Option<i64>,
     pub include_original: bool,
     pub draft_id: Option<i64>,
+    /// 固定的 Message-ID（不带尖括号）。发件箱入队时生成，重试沿用同一个，
+    /// 这样重发前可以去「已发送」里按它核对是否其实已经发出过。为空则组信时现生成。
+    #[serde(default)]
+    pub message_id: String,
+}
+
+/// 生成一个 Message-ID（不带尖括号），域名取发件地址的域名
+pub fn new_message_id(email: &str) -> String {
+    let domain = email.split('@').nth(1).filter(|d| !d.is_empty()).unwrap_or("localhost");
+    format!("{}@{}", uuid::Uuid::new_v4(), domain)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -547,8 +558,8 @@ fn build_with(store: &Store, acc: &super::model::Account, o: &Outgoing, orig_att
             bail!("收件人地址不正确：{a}");
         }
     }
-    let domain = acc.email.split('@').nth(1).unwrap_or("localhost");
-    let message_id = format!("{}@{}", uuid::Uuid::new_v4(), domain);
+    let fixed = o.message_id.trim().trim_start_matches('<').trim_end_matches('>');
+    let message_id = if fixed.is_empty() { new_message_id(&acc.email) } else { fixed.to_string() };
     let subject = if o.subject.trim().is_empty() { "(无主题)".to_string() } else { o.subject.trim().to_string() };
     let mut b = MessageBuilder::new()
         .from((acc.display_name().to_string(), acc.email.clone()))
@@ -663,6 +674,12 @@ fn build_with(store: &Store, acc: &super::model::Account, o: &Outgoing, orig_att
 }
 
 pub async fn send(eng: Engine, o: Outgoing) -> Result<SendResult> {
+    send_with(eng, o, || {}).await
+}
+
+/// 同 `send`，SMTP 服务器一确认收下（250）就先调用 `on_accepted`，再做存「已发送」、删草稿等收尾。
+/// 发件箱用它立刻把状态记成「已收下」：收尾期间进程被杀，重启后也不会再发一次。
+pub async fn send_with(eng: Engine, o: Outgoing, on_accepted: impl FnOnce() + Send) -> Result<SendResult> {
     let store = eng.store().clone();
     let acc = accounts::get(&store, o.account_id)?.ok_or_else(|| super::error::rejected("请选择发件账号（原发件账号可能已删除）"))?;
     if acc.is_local() {
@@ -677,6 +694,7 @@ pub async fn send(eng: Engine, o: Outgoing) -> Result<SendResult> {
     let built = build(&store, &acc, &o, orig).map_err(|e| super::error::rejected(format!("{e:#}")))?;
     let pw = accounts::credential(&store, &acc, eng.proxy().as_ref()).await?;
     smtp::send(&acc, &pw, eng.proxy().as_ref(), &built.rcpts, &built.raw_smtp).await.context("发送失败")?;
+    on_accepted();
 
     let sent: Option<(i64, String)> =
         store.r().query_row("SELECT id, path FROM folders WHERE account_id = ? AND role = 'sent'", [acc.id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;

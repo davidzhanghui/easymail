@@ -1,6 +1,6 @@
 [package]
 name = "easymail"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 license = "MIT"
 description = "EasyMail · 迷你邮件 —— 本地优先的多账号邮件客户端与归档工具（Rust + GPUI，macOS）"

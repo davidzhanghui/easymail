@@ -197,6 +197,14 @@ pub fn show(window: &Window, bounds: Bounds<Pixels>, key: u64, document: &str) {
             *l = Some(Live { key: !key, view, _nav: nav, _msg: msg, parent, frozen: false, frame });
         }
         let live = l.as_mut().unwrap();
+        // 写信挪到独立窗口（或从一个窗口换到另一个）时，把原生编辑器搬过去
+        if !std::ptr::eq(&*live.parent, parent) {
+            live.view.removeFromSuperview();
+            parent.addSubview(&live.view);
+            live.parent = unsafe { Retained::retain(parent as *const NSView as *mut NSView) }.expect("ns_view");
+            live.frame = CGRect::new(CGPoint::new(-1., -1.), CGSize::new(0., 0.));
+            // 强制下面重设位置
+        }
         if live.key != key {
             live.key = key;
             EVENTS.lock().unwrap().clear();
@@ -229,6 +237,15 @@ pub fn hide() {
 /// 只关掉属于 `key` 的编辑器（写信窗口释放时调用，避免误关新开的那个）
 pub fn hide_key(key: u64) {
     if LIVE.with(|l| l.borrow().as_ref().is_some_and(|x| x.key == key)) {
+        hide();
+    }
+}
+
+/// 关了写信窗口：编辑器若正挂在这个窗口上就释放掉（避免视图悬空在已销毁的窗口里）
+pub fn hide_key_for_window(window: &Window) {
+    let Some(parent) = crate::webview::parent_view(window) else { return };
+    let same = LIVE.with(|l| l.borrow().as_ref().is_some_and(|x| std::ptr::eq(&*x.parent, parent)));
+    if same {
         hide();
     }
 }

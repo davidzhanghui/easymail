@@ -58,6 +58,36 @@ impl T {
         false
     }
 
+    /// 当前写信窗口里的 Composer（写信现在是独立窗口）
+    fn composer(&self, cx: &mut AsyncApp) -> Option<Entity<super::composer::Composer>> {
+        cx.update(super::composer_window::composer_of).ok().flatten()
+    }
+
+    fn composer_body(&self, cx: &mut AsyncApp) -> String {
+        let Some(c) = self.composer(cx) else { return String::new() };
+        cx.read_entity(&c, |c, cx| c.body_text(cx)).unwrap_or_default()
+    }
+
+    fn with_composer(&self, cx: &mut AsyncApp, f: impl FnOnce(&mut super::composer::Composer, &mut Context<super::composer::Composer>)) -> bool {
+        let Some(c) = self.composer(cx) else { return false };
+        let _: Result<(), _> = cx.update_entity(&c, f);
+        true
+    }
+
+    /// 把按键发给写信窗口（它有自己的窗口，主窗口的 dispatch 到不了）
+    fn key_composer(&self, cx: &mut AsyncApp, k: &str) {
+        let Some(h) = cx.update(super::composer_window::current).ok().flatten() else { return };
+        let ks = Keystroke::parse(k).expect("keystroke");
+        let _ = cx.update_window(h.into(), |_, w, cx| w.dispatch_keystroke(ks, cx));
+    }
+
+    async fn shot_composer(&self, cx: &mut AsyncApp, name: &str) -> Option<(image::RgbaImage, f32)> {
+        self.wait(cx, 350).await;
+        let h = cx.update(super::composer_window::current).ok().flatten()?;
+        let path = self.dir.join(format!("{name}.png"));
+        cx.update_window(h.into(), |_, w, _| testkit::self_shot(w, &path).map(|i| (i, w.scale_factor()))).ok().flatten()
+    }
+
     fn check(&mut self, name: &str, ok: bool) {
         println!("CHECK {} {name}", if ok { "ok  " } else { "FAIL" });
         if !ok {
@@ -92,8 +122,8 @@ async fn shots(t: &mut T, cx: &mut AsyncApp) {
     t.shot(cx, "02-reader").await;
     t.key(cx, "r");
     t.wait(cx, 900).await;
-    t.shot(cx, "03-compose").await;
-    t.key(cx, "escape");
+    t.shot_composer(cx, "03-compose").await;
+    t.key_composer(cx, "escape");
     t.wait(cx, 300).await;
     t.with(cx, |a, _, cx| a.toggle_pop_for_test(Pop::Theme, cx));
     t.wait(cx, 700).await;
@@ -109,8 +139,8 @@ async fn shots(t: &mut T, cx: &mut AsyncApp) {
     // 暗色主题下回复：引用原文要看得清（回归检查用，不进 README）
     t.key(cx, "r");
     t.wait(cx, 900).await;
-    t.shot(cx, "x-dark-compose").await;
-    t.key(cx, "escape");
+    t.shot_composer(cx, "x-dark-compose").await;
+    t.key_composer(cx, "escape");
     t.wait(cx, 300).await;
     t.with(cx, |a, w, cx| {
         let mut p = a.pref.clone();
@@ -316,22 +346,13 @@ async fn e2e(t: &mut T, cx: &mut AsyncApp) {
 
     // 6. r 回复：预填收件人 / 主题，补一句正文后 ⌘↵ 发送
     t.key(cx, "r");
-    let composer = t.read(cx, |a, _| matches!(a.modal, Some(Modal::Composer(_)))).unwrap_or(false);
-    t.check("r 打开回复窗口", composer);
-    t.check("回复时 WebView 冻结", t.until(cx, 5, |_, _| webview::is_frozen()).await);
-    let (to, subj) = t
-        .read(cx, |a, cx| match &a.modal {
-            Some(Modal::Composer(c)) => (c.read(cx).to.read(cx).text(), c.read(cx).subject.read(cx).text()),
-            _ => Default::default(),
-        })
-        .unwrap_or_default();
+    t.check("r 打开回复窗口", t.composer(cx).is_some());
+    // 写信在独立窗口里了：主窗口的阅读区不再被遮住，不需要冻结
+    t.check("回复时主窗口 WebView 不被冻结", !webview::is_frozen());
+    let (to, subj) = t.composer(cx).and_then(|c| t.read(cx, |_, cx| (c.read(cx).to.read(cx).text(), c.read(cx).subject.read(cx).text()))).unwrap_or_default();
     t.check("回复预填收件人", to.contains("bob@local.test"));
     t.check("回复预填主题", subj.starts_with("Re: "));
-    t.with(cx, |a, _, cx| {
-        if let Some(Modal::Composer(c)) = &a.modal {
-            c.update(cx, |c, cx| c.insert_body_text("界面自动化测试的回复", cx));
-        }
-    });
+    t.with_composer(cx, |c, cx| c.insert_body_text("界面自动化测试的回复", cx));
     // 富文本编辑器：WebView 加载后，全选加粗、插 emoji，草稿正文应是带格式的 HTML
     t.check("富文本编辑器已加载", t.until(cx, 10, |_, _| crate::editor::is_live()).await);
     t.wait(cx, 1200).await;
@@ -343,15 +364,11 @@ async fn e2e(t: &mut T, cx: &mut AsyncApp) {
     )
     .await;
     t.wait(cx, 300).await;
-    let body = t.read(cx, |a, cx| match &a.modal {
-        Some(Modal::Composer(c)) => c.read(cx).body_text(cx),
-        _ => String::new(),
-    });
-    let body = body.unwrap_or_default();
+    let body = t.composer_body(cx);
     t.check("正文是 HTML 且含 emoji", crate::core::mailer::is_html_body(&body) && body.contains('😀'));
-    t.shot(cx, "e2e-05-reply").await;
-    t.key(cx, "cmd-enter");
-    let sent = t.until(cx, 30, |a, _| a.modal.is_none() && a.toasts.iter().any(|x| x.msg.starts_with("已发送"))).await;
+    t.shot_composer(cx, "e2e-05-reply").await;
+    t.key_composer(cx, "cmd-enter");
+    let sent = t.until(cx, 30, |a, _| !crate::editor::is_live() && a.toasts.iter().any(|x| x.msg.starts_with("已发送"))).await;
     t.check("⌘↵ 发送成功", sent);
     t.check("原邮件标记已回复", t.until(cx, 10, |a, _| db_flag(a, first, "answered") == 1).await);
 
@@ -425,7 +442,7 @@ async fn e2e(t: &mut T, cx: &mut AsyncApp) {
     let fill = |a: &mut MailApp, w: &mut Window, cx: &mut Context<MailApp>| {
         a.set_nav(Nav::View(View::Inbox), cx);
         a.compose_new(w, cx);
-        if let Some(Modal::Composer(c)) = &a.modal {
+        if let Some(c) = super::composer_window::composer_of(cx) {
             c.update(cx, |c, cx| {
                 c.subject.update(cx, |i, cx| i.set_text("没写完的草稿", cx));
                 c.insert_body_text("明天再写", cx);
@@ -434,8 +451,8 @@ async fn e2e(t: &mut T, cx: &mut AsyncApp) {
     };
     t.with(cx, fill);
     t.wait(cx, 300).await;
-    t.key(cx, "escape");
-    t.check("Esc 关闭写信窗口", t.until(cx, 5, |a, _| a.modal.is_none()).await);
+    t.key_composer(cx, "escape");
+    t.check("Esc 关闭写信窗口", t.until(cx, 5, |_, _| !crate::editor::is_live()).await);
     t.with(cx, |a, _, cx| a.set_nav(Nav::View(View::Drafts), cx));
     t.check("Esc 存为草稿", t.until(cx, 5, |a, _| a.drafts.iter().any(|d| d.subject == "没写完的草稿")).await);
     // 删掉这份，再验证「保存为草稿」
@@ -447,12 +464,8 @@ async fn e2e(t: &mut T, cx: &mut AsyncApp) {
     });
     t.with(cx, fill);
     t.wait(cx, 300).await;
-    t.with(cx, |a, _, cx| {
-        if let Some(Modal::Composer(c)) = &a.modal {
-            c.update(cx, |c, cx| c.save_and_close(cx));
-        }
-    });
-    t.check("保存为草稿并关闭", t.until(cx, 5, |a, _| a.modal.is_none() && a.toasts.iter().any(|x| x.msg.contains("草稿箱"))).await);
+    t.with_composer(cx, |c, cx| c.save_and_close(cx));
+    t.check("保存为草稿并关闭", t.until(cx, 5, |a, _| !crate::editor::is_live() && a.toasts.iter().any(|x| x.msg.contains("草稿箱"))).await);
     t.with(cx, |a, _, cx| a.set_nav(Nav::View(View::Drafts), cx));
     t.check("草稿视图", t.until(cx, 5, |a, _| a.drafts.iter().any(|d| d.subject == "没写完的草稿")).await);
     t.shot(cx, "e2e-08-drafts").await;
@@ -482,11 +495,10 @@ async fn e2e(t: &mut T, cx: &mut AsyncApp) {
             && !html.contains("<style"),
     );
     // 方向键只应移动光标，不能往正文里插字符（曾出现 U+F700 一类的方框）
-    t.with(cx, |a, w, cx| {
-        if let Some(Modal::Composer(c)) = &a.modal {
-            c.update(cx, |c, cx| c.focus_body_for_test(w, cx));
-        }
-    });
+    let cwin = cx.update(super::composer_window::current).ok().flatten();
+    if let (Some(h), Some(c)) = (cwin, t.composer(cx)) {
+        let _ = cx.update_window(h.into(), |_, w, cx| c.update(cx, |c, cx| c.focus_body_for_test(w, cx)));
+    }
     t.wait(cx, 400).await;
     for (code, ch) in [(126u16, "\u{F700}"), (125, "\u{F701}"), (123, "\u{F702}"), (124, "\u{F703}"), (0, "a")] {
         crate::editor::test_key(code, ch);
@@ -505,8 +517,8 @@ async fn e2e(t: &mut T, cx: &mut AsyncApp) {
     t.check("原生按键确实送达编辑器", line2 != "-1");
 
     // 新信：先在收件人里，再点击编辑区下方的空白处，然后按方向键
-    t.key(cx, "escape");
-    t.check("关闭 HTML 回复窗口", t.until(cx, 5, |a, _| a.modal.is_none()).await);
+    t.key_composer(cx, "escape");
+    t.check("关闭 HTML 回复窗口", t.until(cx, 5, |_, _| !crate::editor::is_live()).await);
     t.with(cx, |a, w, cx| a.compose_new(w, cx));
     t.wait(cx, 1500).await;
     crate::editor::test_click(300., 150.);
@@ -736,22 +748,13 @@ async fn e2e(t: &mut T, cx: &mut AsyncApp) {
         t.with(cx, |a, _, _| save_templates(&a.store, &many));
         t.with(cx, |a, w, cx| a.compose_new(w, cx));
         t.wait(cx, 600).await;
-        t.with(cx, |a, _, cx| {
-            if let Some(Modal::Composer(c)) = &a.modal {
-                c.update(cx, |c, cx| c.set_template_menu_for_test(true, cx));
-            }
-        });
+        t.with_composer(cx, |c, cx| c.set_template_menu_for_test(true, cx));
         t.wait(cx, 500).await;
-        t.shot(cx, "e2e-template-menu").await;
-        t.with(cx, |a, _, cx| {
-            if let Some(Modal::Composer(c)) = &a.modal {
-                c.update(cx, |c, cx| c.set_template_menu_for_test(false, cx));
-            }
-        });
+        t.shot_composer(cx, "e2e-template-menu").await;
+        t.with_composer(cx, |c, cx| c.set_template_menu_for_test(false, cx));
         t.with(cx, |a, _, _| save_templates(&a.store, &saved));
-        t.key(cx, "escape");
+        t.key_composer(cx, "escape");
         t.wait(cx, 300).await;
-        t.with(cx, |a, _, _| a.modal = None);
     }
 
     // 14. Dock 角标与收件箱未读一致
@@ -812,7 +815,7 @@ async fn images(t: &mut T, cx: &mut AsyncApp) {
     t.with(cx, |a, w, cx| {
         a.set_nav(Nav::View(View::Inbox), cx);
         a.compose_new(w, cx);
-        if let Some(Modal::Composer(c)) = &a.modal {
+        if let Some(c) = super::composer_window::composer_of(cx) {
             c.update(cx, |c, cx| {
                 c.to.update(cx, |i, cx| i.set_text("me@local.test", cx));
                 c.subject.update(cx, |i, cx| i.set_text("图片渲染测试", cx));
@@ -821,27 +824,29 @@ async fn images(t: &mut T, cx: &mut AsyncApp) {
     });
     t.check("图片：编辑器加载", t.until(cx, 10, |_, _| crate::editor::is_live()).await);
     t.wait(cx, 1200).await;
-    t.with(cx, |a, _, cx| {
-        if let Some(Modal::Composer(c)) = &a.modal {
-            c.update(cx, |c, cx| {
-                c.insert_body_text("下面是一张二维码和一只猫：", cx);
-                c.ingest_for_test(qr.clone(), cx);
-                c.ingest_for_test(cat.clone(), cx);
-            });
-        }
+    t.with_composer(cx, |c, cx| {
+        c.insert_body_text("下面是一张二维码和一只猫：", cx);
+        c.ingest_for_test(qr.clone(), cx);
+        c.ingest_for_test(cat.clone(), cx);
     });
     let ed_state = wait_images(t, cx, true).await;
     t.check(&format!("图片：插入后编辑器里显示 {ed_state}"), both_rendered(&ed_state));
-    t.check(
-        "图片：草稿正文只带 data-token（不含 base64）",
-        t.until(cx, 5, |a, cx| {
-            matches!(&a.modal, Some(Modal::Composer(c)) if { let b = c.read(cx).body_text(cx); b.matches("data-token=").count() == 2 && !b.contains("base64") })
-        })
-        .await,
-    );
-    t.shot(cx, "e2e-10-image-compose").await;
-    t.key(cx, "cmd-enter");
-    t.check("图片：发送成功", t.until(cx, 60, |a, _| a.modal.is_none() && a.toasts.iter().any(|x| x.msg.starts_with("已发送"))).await);
+    {
+        // 编辑器把正文变化异步回传给 Rust，稍等一下
+        let mut ok = false;
+        for _ in 0..25 {
+            let b = t.composer_body(cx);
+            if b.matches("data-token=").count() == 2 && !b.contains("base64") {
+                ok = true;
+                break;
+            }
+            t.wait(cx, 200).await;
+        }
+        t.check("图片：草稿正文只带 data-token（不含 base64）", ok);
+    }
+    t.shot_composer(cx, "e2e-10-image-compose").await;
+    t.key_composer(cx, "cmd-enter");
+    t.check("图片：发送成功", t.until(cx, 60, |a, _| !crate::editor::is_live() && a.toasts.iter().any(|x| x.msg.starts_with("已发送"))).await);
 
     // 收件方（发给自己）阅读视图
     let state = open_by_subject(t, cx, "图片渲染测试").await;
@@ -852,23 +857,16 @@ async fn images(t: &mut T, cx: &mut AsyncApp) {
 
     // 回复：引用里保留两张图（大图不能被丢掉），草稿正文不带 base64
     t.key(cx, "r");
-    t.check("图片：回复编辑器加载", t.until(cx, 10, |a, _| matches!(a.modal, Some(Modal::Composer(_))) && crate::editor::is_live()).await);
+    t.check("图片：回复编辑器加载", t.until(cx, 10, |_, _| crate::editor::is_live()).await);
     let q_state = wait_images(t, cx, true).await;
     t.check(&format!("图片：回复引用里两张图都显示 {q_state}"), both_rendered(&q_state));
-    t.with(cx, |a, _, cx| {
-        if let Some(Modal::Composer(c)) = &a.modal {
-            c.update(cx, |c, cx| c.insert_body_text("收到，图片看得到", cx));
-        }
-    });
+    t.with_composer(cx, |c, cx| c.insert_body_text("收到，图片看得到", cx));
     t.wait(cx, 600).await;
-    t.check(
-        "图片：回复草稿里引用图片也是 token",
-        t.read(cx, |a, cx| matches!(&a.modal, Some(Modal::Composer(c)) if { let b = c.read(cx).body_text(cx); b.matches("data-token=").count() == 2 && !b.contains("base64") }))
-            .unwrap_or(false),
-    );
-    t.shot(cx, "e2e-12-image-reply").await;
-    t.key(cx, "cmd-enter");
-    t.check("图片：回复窗口关闭（发送）", t.until(cx, 60, |a, _| a.modal.is_none()).await);
+    let reply_body = t.composer_body(cx);
+    t.check("图片：回复草稿里引用图片也是 token", reply_body.matches("data-token=").count() == 2 && !reply_body.contains("base64"));
+    t.shot_composer(cx, "e2e-12-image-reply").await;
+    t.key_composer(cx, "cmd-enter");
+    t.check("图片：回复窗口关闭（发送）", t.until(cx, 60, |_, _| !crate::editor::is_live()).await);
 
     let state = open_by_subject(t, cx, "Re: 图片渲染测试").await;
     t.check(&format!("图片：回复邮件里引用的两张图正常渲染 {state}"), both_rendered(&state));

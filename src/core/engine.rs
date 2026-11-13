@@ -79,6 +79,11 @@ pub enum Evt {
         msg: String,
         error: bool,
     },
+    /// 别的窗口（写信窗口）要把一条「可撤回发送」的提示交给主窗口显示
+    Unsendable {
+        msg: String,
+        outbox_id: i64,
+    },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -143,11 +148,20 @@ enum Job {
         ids: Vec<i64>,
         reply: oneshot::Sender<usize>,
     },
+    /// 只读查询：文件夹里有没有这个 Message-ID 的信（发件箱重发前核对用）
+    Probe {
+        path: String,
+        message_id: String,
+        reply: oneshot::Sender<Result<bool>>,
+    },
 }
 
 /// 后台重放（同步过程中顺带执行）时跳过刚写入、还没试过的待办：它们的提交者马上会发 Flush 并亲自报告结果，
 /// 免得同一条「被拒绝」既在后台弹一次提示、又在提交处报一次错
 const FRESH_MS: i64 = 3_000;
+
+/// 服务器不支持 NOTIFY 时，每个账号最多额外开几条「按文件夹实时监听」的连接（有些服务商限制并发）
+const WATCH_FOLDERS_MAX: usize = 3;
 
 #[derive(Default)]
 struct SyncJob {
@@ -212,6 +226,8 @@ struct Inner {
     handles: Mutex<HashMap<i64, Handle>>,
     states: Mutex<HashMap<i64, SyncState>>,
     watch: Mutex<HashMap<i64, WatchMode>>,
+    /// 账号的服务器是否支持 IMAP NOTIFY（支持时收件箱那条连接就已经覆盖所有文件夹，不用额外连接）
+    notify_ok: Mutex<HashMap<i64, bool>>,
     started: Mutex<bool>,
 }
 
@@ -249,6 +265,7 @@ impl Engine {
                 handles: Mutex::new(HashMap::new()),
                 states: Mutex::new(HashMap::new()),
                 watch: Mutex::new(HashMap::new()),
+                notify_ok: Mutex::new(HashMap::new()),
                 started: Mutex::new(false),
             }),
         })
@@ -289,6 +306,11 @@ impl Engine {
 
     pub fn sync_state(&self, id: i64) -> SyncState {
         self.inner.states.lock().unwrap().get(&id).cloned().unwrap_or_default()
+    }
+
+    /// 这个账号的服务器是否支持 IMAP NOTIFY（支持时所有文件夹都是实时的）
+    pub fn notify_supported(&self, id: i64) -> bool {
+        self.inner.notify_ok.lock().unwrap().get(&id).copied().unwrap_or(false)
     }
 
     pub fn watch_mode(&self, id: i64) -> WatchMode {
@@ -347,7 +369,9 @@ impl Engine {
             }
         });
         // 发件箱、稍后处理：每 3 秒看一眼（只查一条带索引的 SQL，空闲时几乎零开销）
-        super::outbox::recover(self.store());
+        if super::outbox::recover(self.store()) > 0 {
+            self.toast("上次退出时有一封邮件已被服务器收下，已按已发送处理，没有重复发送".to_string(), false);
+        }
         let me = self.clone();
         self.spawn(async move {
             loop {
@@ -421,6 +445,9 @@ impl Engine {
             let me = self.clone();
             let rx = h.stop.subscribe();
             self.inner.rt().spawn(async move { me.watch_loop(id, rx).await });
+            let me = self.clone();
+            let rx = h.stop.subscribe();
+            self.inner.rt().spawn(async move { me.folder_watch_supervisor(id, rx).await });
         }
         (h.ops.clone(), h.syncs.clone())
     }
@@ -477,6 +504,38 @@ impl Engine {
                 bail!("操作队列已关闭");
             }
             rx.await.map_err(|_| anyhow!("操作被中断"))
+        }
+    }
+
+    /// 用户勾选「实时监听」的文件夹（服务器不支持 NOTIFY 时，每个文件夹额外开一条 IDLE 连接）
+    pub fn watched_folders(store: &Store, account_id: i64) -> Vec<i64> {
+        store.get_kv(&format!("watch_folders.{account_id}")).and_then(|v| serde_json::from_str::<Vec<i64>>(&v).ok()).unwrap_or_default()
+    }
+
+    /// 勾选 / 取消某个文件夹的实时监听
+    pub fn set_folder_watch(store: &Store, account_id: i64, folder_id: i64, on: bool) {
+        let mut v = Self::watched_folders(store, account_id);
+        v.retain(|id| *id != folder_id);
+        if on {
+            v.push(folder_id);
+        }
+        // 163 / QQ 对并发连接数有限制：每个账号最多额外监听 3 个文件夹
+        if v.len() > WATCH_FOLDERS_MAX {
+            v.drain(0..v.len() - WATCH_FOLDERS_MAX);
+        }
+        store.set_kv(&format!("watch_folders.{account_id}"), &serde_json::to_string(&v).unwrap_or_else(|_| "[]".into()));
+    }
+
+    /// 服务器上 `path` 文件夹里有没有 Message-ID 为 `message_id` 的信
+    pub fn has_message(&self, id: i64, path: String, message_id: String) -> impl Future<Output = Result<bool>> + Send + 'static {
+        let (o, _) = self.ensure_account(id, false);
+        let (tx, rx) = oneshot::channel();
+        let sent = o.send(Job::Probe { path, message_id, reply: tx }).is_ok();
+        async move {
+            if !sent {
+                bail!("操作队列已关闭");
+            }
+            rx.await.unwrap_or_else(|_| Err(anyhow!("操作被中断")))
         }
     }
 
@@ -627,6 +686,7 @@ impl Engine {
         *established = true;
         let idle = c.caps.idle;
         let notify = idle && c.enable_notify().await;
+        self.inner.notify_ok.lock().unwrap().insert(id, notify);
         self.set_watch(id, if idle { WatchMode::Idle } else { WatchMode::Poll });
         // IDLE：每 5 分钟重进一次（代理 / NAT 会悄悄掐掉长时间无流量的连接）；不支持 IDLE：45 秒一次 NOOP
         let period = if idle { Duration::from_secs(300) } else { Duration::from_secs(45) };
@@ -666,6 +726,123 @@ impl Engine {
                     self.emit(Evt::NewMail { account_id: id, email: acc.email.clone(), count: n, from, subject });
                     self.request_sync(id, None, true);
                 }
+            }
+        }
+    }
+}
+
+// ======================= 按文件夹实时监听 =======================
+
+impl Engine {
+    /// 服务器不支持 NOTIFY 时，给用户勾选的文件夹各开一条 IDLE 连接。
+    /// 每 30 秒对一遍列表：新勾选的起来，取消的停掉；支持 NOTIFY 的账号全部停掉。
+    async fn folder_watch_supervisor(&self, id: i64, stop: StopRx) {
+        let mut running: HashMap<i64, watch::Sender<bool>> = HashMap::new();
+        loop {
+            let notify = self.inner.notify_ok.lock().unwrap().get(&id).copied().unwrap_or(false);
+            let mut want: Vec<i64> = if notify { Vec::new() } else { Self::watched_folders(self.store(), id) };
+            // 收件箱由主监听连接负责，不用重复开
+            want.retain(|f| {
+                self.store().r().query_row("SELECT role FROM folders WHERE id = ?", [f], |r| r.get::<_, String>(0)).map(|role| role != "inbox").unwrap_or(false)
+            });
+            want.sort_unstable();
+            want.dedup();
+            running.retain(|fid, tx| {
+                if want.contains(fid) {
+                    true
+                } else {
+                    let _ = tx.send(true);
+                    false
+                }
+            });
+            for fid in want {
+                if running.contains_key(&fid) {
+                    continue;
+                }
+                let (tx, rx) = watch::channel(false);
+                let me = self.clone();
+                self.inner.rt().spawn(async move { me.folder_watch_loop(id, fid, rx).await });
+                running.insert(fid, tx);
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(30)) => {}
+                _ = stopped(stop.clone()) => {
+                    for (_, tx) in running {
+                        let _ = tx.send(true);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    async fn folder_watch_loop(&self, acc_id: i64, folder_id: i64, stop: StopRx) {
+        loop {
+            let b = self.backoff(acc_id);
+            if b.blocked(now_ms()) {
+                let wait = if b.auth { 60 } else { ((b.until - now_ms()) / 1000).clamp(30, 1800) as u64 };
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(wait)) => continue,
+                    _ = stopped(stop.clone()) => return,
+                }
+            }
+            let info: Option<(String, String)> = self
+                .store()
+                .r()
+                .query_row("SELECT path, role FROM folders WHERE id = ? AND account_id = ?", [folder_id, acc_id], |r| Ok((r.get(0)?, r.get(1)?)))
+                .ok();
+            let Some((path, _role)) = info else {
+                // 文件夹被删了：退出，supervisor 下次对列表时也不会再起
+                return;
+            };
+            let Ok(Some(acc)) = accounts::get(self.store(), acc_id) else { return };
+            if !acc.sync_enabled || acc.is_local() {
+                return;
+            }
+            let r = async {
+                let pw = accounts::credential(self.store(), &acc, self.proxy().as_ref()).await?;
+                let mut c = Imap::connect(&acc, &pw, self.proxy().as_ref()).await?;
+                c.select(&path).await?;
+                loop {
+                    let st = stop.clone();
+                    let halt = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let flag = halt.clone();
+                    let (next, changed) = c
+                        .idle(Duration::from_secs(300), async move {
+                            stopped(st).await;
+                            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        })
+                        .await?;
+                    c = next;
+                    if halt.load(std::sync::atomic::Ordering::SeqCst) {
+                        c.logout().await;
+                        return Ok::<bool, anyhow::Error>(true);
+                    }
+                    if changed {
+                        tokio::time::sleep(Duration::from_millis(1200)).await;
+                        if let Ok(n) = self.sync_and_wait(acc_id, Some(folder_id), false).await {
+                            if n > 0 {
+                                self.emit(Evt::Folder { account_id: acc_id, folder_id, added: 0 });
+                            }
+                        }
+                    }
+                }
+            }
+            .await;
+            match r {
+                Ok(true) => return, // 被要求停止
+                Ok(false) => {}
+                Err(e) if kind_of(&e) == ErrorKind::Connection => {
+                    log::info!("[watch] 账号 {acc_id} 文件夹 {path} 的监听连接断开，稍后重连：{e:#}");
+                }
+                Err(e) => {
+                    log::warn!("[watch] 账号 {acc_id} 文件夹 {path} 监听失败：{e:#}");
+                    self.record_failure(acc_id, &e);
+                }
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                _ = stopped(stop.clone()) => return,
             }
         }
     }
@@ -741,6 +918,18 @@ impl Worker {
     async fn handle(&mut self, job: Job) {
         match job {
             Job::Op(op) => self.exec(op).await,
+            Job::Probe { path, message_id, reply } => {
+                let mut r = self.probe(&path, &message_id).await;
+                if r.as_ref().is_err_and(|e| kind_of(e) != ErrorKind::Rejected) {
+                    // 连接坏了：重连再试一次（只读，可以放心重试）
+                    self.conn = None;
+                    r = self.probe(&path, &message_id).await;
+                    if r.is_err() {
+                        self.conn = None;
+                    }
+                }
+                let _ = reply.send(r);
+            }
             Job::Flush { ids, reply } => {
                 self.replay(false).await;
                 let out = ids.iter().map(|id| (*id, self.recent.get(id).cloned().unwrap_or(Outcome::Done))).collect();
@@ -957,6 +1146,12 @@ impl Worker {
             }
         }
         let _ = job.reply.send(r);
+    }
+
+    async fn probe(&mut self, path: &str, message_id: &str) -> Result<bool> {
+        let c = self.conn().await?;
+        c.select(path).await?;
+        Ok(!c.find_message_id(path, message_id).await?.is_empty())
     }
 
     async fn exec_op(&mut self, op: &Op) -> Result<()> {

@@ -23,13 +23,13 @@
 - **OAuth sign-in** — Outlook / Microsoft 365 via browser authorization (XOAUTH2), no app password needed; Gmail too (bring your own Google client ID). Custom servers can be auto-configured from the email domain (Thunderbird ISPDB)
 - **Local-first** — envelopes and bodies are cached in SQLite + `.eml` files, readable and searchable offline. Deletes / moves / flags made offline are queued and delivered when you're back online
 - **Undo & unsend** — moves / deletes can be undone for a few seconds (⌘Z); outgoing mail goes through an outbox with a 5-second unsend window by default, scheduled sending, and automatic backoff on network errors
-- **Real-time** — IMAP IDLE (45 s polling fallback), menu-bar tray, Dock badge, system notifications
+- **Real-time** — IMAP IDLE / NOTIFY; per-folder watching when the server has no NOTIFY (45 s polling fallback), menu-bar tray, Dock badge, system notifications
 - **Full-text search** — substring search for CJK and Latin text (FTS5 trigram + CJK bigram index) with `from:` `to:` `subject:` `filename:` `in:` `is:unread` `is:starred` `has:attachment` `before:` `after:` `larger:` `smaller:` and `-exclude`; save frequent searches to the sidebar
 - **Conversation view** — groups messages by References / In-Reply-To, one row per thread
 - **Organizing** — local rules (auto move / mark / archive new mail), snooze, a per-sender view with bulk read / unsubscribe / delete, one-click unsubscribe (RFC 8058), an invoices view, reply templates and a ⌘K command palette
 - **Privacy & safety** — WKWebView with JavaScript disabled and a non-persistent data store; a CSP blocks remote images by default (allow per sender); blocked tracking pixels and a privacy report; warnings when SPF / DKIM / DMARC fail or a link's text doesn't match its target; tracking parameters (utm_* etc.) are stripped when opening links
 - **Reading helpers** — verification codes detected with one-click copy; flight / train / hotel itineraries
-- **Rich-text composer** — reply / reply all / forward, signatures, attachments, inline images; drafts autosave and sync to the server's Drafts folder
+- **Rich-text composer in its own window** — reply / reply all / forward, signatures, attachments, inline images; drafts autosave and sync to the server's Drafts folder
 - **Ten color themes** — seven light, three dark, or follow the system
 - **Import / export / backup** — import `.eml` / `.mbox` into a local archive; export mbox, CSV or a standard maildir; verified full backups, scheduled incremental export, copy folders between accounts (resumable IMAP copy), and safe cache slimming
 - **CLI & AI access** — `easymail-cli` searches / reads / exports your local library from the terminal and serves a read-only MCP server for local AI tools

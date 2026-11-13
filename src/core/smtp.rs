@@ -5,11 +5,27 @@
 
 use super::model::Account;
 use super::net::{self, Conn, Proxy};
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use std::time::Duration;
 use tokio::io::{AsyncWriteExt, BufReader};
+
+/// 错误链上的标记：DATA 正文已经写完、在等服务器最后的回应时出错。这时服务器**可能已经收下**了，
+/// 不能当成普通的连接失败直接重发（SMTP 没有幂等性，会让对方收到两封）。
+#[derive(Debug, Clone, Copy)]
+pub struct MaybeDelivered;
+
+impl std::fmt::Display for MaybeDelivered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("邮件已写给服务器，但没等到确认")
+    }
+}
+
+/// 这个错误是否发生在「正文已写出、未确认」阶段
+pub fn maybe_delivered(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<MaybeDelivered>().is_some()
+}
 
 /// 普通命令的写超时
 const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -201,7 +217,8 @@ pub async fn send(acc: &Account, password: &str, proxy: Option<&Proxy>, rcpts: &
     let mut body = dot_stuff(raw);
     body.extend_from_slice(b".\r\n");
     s.write(&body, data_timeout(body.len())).await?;
-    let r = s.read().await?;
+    // 正文已经全部写出，此时断线 / 超时，服务器可能已经收下了：打上标记，让发件箱重发前先核对
+    let r = s.read().await.context(MaybeDelivered)?;
     if r.code != 250 {
         return Err(reply_error(&r, "服务器拒收邮件"));
     }
@@ -224,6 +241,14 @@ mod tests {
         assert_eq!(dot_stuff(b"a\n.b\r\n..c"), b"a\r\n..b\r\n...c\r\n");
         assert_eq!(dot_stuff(b".x\r\n"), b"..x\r\n");
         assert_eq!(dot_stuff(b"x\ry"), b"x\r\ny\r\n");
+    }
+
+    #[test]
+    fn maybe_delivered_marker_survives_context() {
+        let e = Err::<(), _>(anyhow!("读超时")).context(MaybeDelivered).context("发送失败").unwrap_err();
+        assert!(maybe_delivered(&e));
+        assert_eq!(crate::core::error::kind_of(&e), crate::core::error::ErrorKind::Connection);
+        assert!(!maybe_delivered(&anyhow!("连接 SMTP 服务器超时")));
     }
 
     #[test]

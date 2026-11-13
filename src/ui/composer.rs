@@ -171,6 +171,8 @@ pub struct Composer {
     save_gen: u64,
     /// 自动保存的防抖任务：最后一次输入 2.5 秒后存草稿
     autosave: Option<Task<()>>,
+    /// 在独立窗口里显示（不是主窗口上的模态）：外壳铺满窗口
+    pub window_mode: bool,
     /// 定时发送菜单是否展开
     schedule_menu: bool,
     /// 回复模板菜单是否展开
@@ -296,6 +298,7 @@ impl Composer {
             dirty: false,
             save_gen: 0,
             autosave: None,
+            window_mode: false,
             schedule_menu: false,
             template_menu: false,
             suggest: vec![],
@@ -851,6 +854,7 @@ impl Composer {
             source_id: d.source_id,
             include_original: d.include_original,
             draft_id,
+            ..Default::default()
         };
         match crate::core::outbox::enqueue(self.eng.store(), &o, at) {
             Ok(id) => {
@@ -998,9 +1002,10 @@ impl Render for Composer {
             .as_ref()
             .map(|a| if a.name.is_empty() { a.email.clone() } else { format!("{} <{}>", a.name, a.email) })
             .unwrap_or_else(|| "（没有可用的发件账号）".into());
-        let mut from_row = div().relative().child(
+        let mut from_row = div().relative().w_full().child(
             div()
                 .flex()
+                .w_full()
                 .items_center()
                 .gap(px(10.))
                 .h(px(40.))
@@ -1164,9 +1169,12 @@ impl Render for Composer {
         });
         let vp = window.viewport_size();
         let h = (f32::from(vp.height) * 0.9).clamp(460., 780.);
-        modal_shell(&t, 760., title_of(&self.draft.mode), sub, close)
-            .relative()
-            .h(px(h))
+        let shell = if self.window_mode {
+            window_shell(&t, title_of(&self.draft.mode), sub, close).size_full()
+        } else {
+            modal_shell(&t, 760., title_of(&self.draft.mode), sub, close).relative().h(px(h))
+        };
+        shell
             .key_context("Composer")
             .on_action(cx.listener(|c, _: &SendMail, w, cx| c.send(w, cx)))
             // 点正文以外的地方：原生焦点还给 GPUI（编辑器自己的点击不会到这里）

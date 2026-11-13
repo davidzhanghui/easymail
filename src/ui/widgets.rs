@@ -172,41 +172,47 @@ pub fn menu_sep(t: &Theme) -> Div {
 
 /// 模态外壳：标题、副标题、内容、底栏。点遮罩关闭由调用方决定。
 pub fn modal_shell(t: &Theme, w: f32, title: impl Into<SharedString>, sub: impl Into<SharedString>, close: Stateful<Div>) -> Div {
+    shell_frame(
+        t,
+        title,
+        sub,
+        close,
+        div().w(px(w)).max_w(relative(0.94)).max_h(relative(0.9)).border_1().border_color(t.border).rounded(px(14.)).shadow(vec![BoxShadow {
+            color: t.shadow,
+            offset: point(px(0.), px(18.)),
+            blur_radius: px(60.),
+            spread_radius: px(0.),
+        }]),
+    )
+}
+
+/// 独立窗口里的「模态」外壳：和 `modal_shell` 一样的标题栏，但铺满整个窗口，没有圆角 / 边框 / 阴影。
+pub fn window_shell(t: &Theme, title: impl Into<SharedString>, sub: impl Into<SharedString>, close: Stateful<Div>) -> Div {
+    shell_frame(t, title, sub, close, div().size_full())
+}
+
+fn shell_frame(t: &Theme, title: impl Into<SharedString>, sub: impl Into<SharedString>, close: Stateful<Div>, frame: Div) -> Div {
     let sub: SharedString = crate::i18n::tr_shared(sub.into());
-    div()
-        .w(px(w))
-        .max_w(relative(0.94))
-        .max_h(relative(0.9))
-        .bg(t.panel)
-        .border_1()
-        .border_color(t.border)
-        .rounded(px(14.))
-        .shadow(vec![BoxShadow { color: t.shadow, offset: point(px(0.), px(18.)), blur_radius: px(60.), spread_radius: px(0.) }])
-        .flex()
-        .flex_col()
-        .overflow_hidden()
-        .text_color(t.ink)
-        .font_family(SANS)
-        .child(
-            div()
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap(px(10.))
-                .px(px(22.))
-                .pt(px(18.))
-                .pb(px(14.))
-                .border_b_1()
-                .border_color(t.border_soft)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(div().font_family(SERIF).text_size(px(18.)).font_weight(FontWeight::BOLD).child(crate::i18n::tr_shared(title.into())))
-                        .when(!sub.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(t.muted).mt(px(2.)).child(sub))),
-                )
-                .child(close),
-        )
+    frame.bg(t.panel).flex().flex_col().overflow_hidden().text_color(t.ink).font_family(SANS).child(
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(10.))
+            .px(px(22.))
+            .pt(px(18.))
+            .pb(px(14.))
+            .border_b_1()
+            .border_color(t.border_soft)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().font_family(SERIF).text_size(px(18.)).font_weight(FontWeight::BOLD).child(crate::i18n::tr_shared(title.into())))
+                    .when(!sub.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(t.muted).mt(px(2.)).child(sub))),
+            )
+            .child(close),
+    )
 }
 
 pub fn modal_footer(t: &Theme) -> Div {

@@ -5,6 +5,7 @@ pub mod app;
 #[cfg(feature = "dev")]
 pub mod autotest;
 pub mod composer;
+pub mod composer_window;
 pub mod freeze;
 pub mod import;
 pub mod line_input;

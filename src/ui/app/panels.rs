@@ -217,7 +217,7 @@ impl MailApp {
             Cmd::Undo => self.undo(cx),
             Cmd::ToggleThreads => self.toggle_threads(cx),
         }
-        if !matches!(self.modal, Some(Modal::Panel(_)) | Some(Modal::Composer(_)) | Some(Modal::Accounts(_)) | Some(Modal::Import(_))) {
+        if !matches!(self.modal, Some(Modal::Panel(_)) | Some(Modal::Accounts(_)) | Some(Modal::Import(_))) {
             window.focus(&self.focus);
         }
     }
@@ -927,18 +927,19 @@ impl MailApp {
     }
 
     fn folder_chips(&self, t: &Theme, idp: &'static str, sel: Option<i64>, cx: &mut Context<Self>, pick: fn(&mut Panel, i64)) -> Div {
-        let mut col = div().flex().flex_col().gap(px(2.)).max_h(px(260.)).overflow_hidden();
+        // 不限高：外层面板内容区本身可滚动；flex_none 防止被压扁（之前限高 260 会把后面的账号裁掉）
+        let mut col = div().flex().flex_col().flex_none().gap(px(2.));
         for a in &self.accounts {
             let fs: Vec<&Folder> = self.folders.iter().filter(|f| f.account_id == a.id && f.role != "flagged" && f.role != "all").collect();
             if fs.is_empty() {
                 continue;
             }
-            col = col.child(div().pt(px(6.)).text_size(px(11.)).text_color(t.muted).child(if a.is_local() {
+            col = col.child(div().flex_none().pt(px(6.)).text_size(px(11.)).text_color(t.muted).child(if a.is_local() {
                 "本地归档".to_string()
             } else {
                 a.email.clone()
             }));
-            let mut row = div().flex().flex_wrap().gap(px(4.));
+            let mut row = div().flex().flex_none().flex_wrap().gap(px(4.));
             for f in fs {
                 let fid = f.id;
                 row = row.child(
@@ -975,7 +976,7 @@ impl MailApp {
         let Some(Modal::Panel(p)) = &self.modal else { return div().into_any_element() };
         let body = div().id("panel-body").px(px(22.)).py(px(14.)).flex_1().min_h(px(0.)).max_h(px(520.)).overflow_y_scroll().flex().flex_col().gap(px(6.));
         let row = |id: SharedString| {
-            div().id(id).flex().items_center().gap(px(10.)).px(px(8.)).py(px(6.)).rounded(px(7.)).text_size(px(12.5)).hover(|s| s.bg(t.row_hover))
+            div().id(id).flex().flex_none().items_center().gap(px(10.)).px(px(8.)).py(px(6.)).rounded(px(7.)).text_size(px(12.5)).hover(|s| s.bg(t.row_hover))
         };
         match p {
             Panel::Palette { input, sel } => {
@@ -1198,7 +1199,7 @@ impl MailApp {
                     );
                 }
                 let chips = |items: &[(&'static str, &'static str)], cur: usize, idp: &'static str, set: fn(&mut Panel, usize)| {
-                    let mut r = div().flex().gap(px(4.));
+                    let mut r = div().flex().flex_none().flex_wrap().gap(px(4.));
                     for (i, (_, label)) in items.iter().enumerate() {
                         r = r.child(
                             div()
@@ -1230,7 +1231,7 @@ impl MailApp {
                             *field = i
                         }
                     }))
-                    .child(field_box(t, focused).child(div().flex_1().child(value.clone())))
+                    .child(field_box(t, focused).flex_none().child(div().flex_1().child(value.clone())))
                     .child(chips(&rules::ACTIONS, action, "ra", |p, i| {
                         if let Panel::Rules { action, .. } = p {
                             *action = i
@@ -1761,11 +1762,25 @@ impl MailApp {
             }
             Panel::Templates { list, name, body: tb } => {
                 let (f1, f2) = (name.read(cx).is_focused(window), tb.focus_handle(cx).is_focused(window));
-                let mut b = body.child(div().text_size(px(11.5)).text_color(t.muted).child("在写信窗口点「模板」插入。Tab 在名称和正文之间切换。"));
+                // 布局：上面是独立滚动的模板列表（占剩余高度），下面「新建模板」表单固定不动。
+                // 以前列表和表单在同一个滚动区里，模板一多表单就被压扁，正文框无法输入。
+                let mut listing = div().id("tp-list").flex().flex_col().gap(px(2.)).flex_1().min_h(px(60.)).overflow_y_scroll().px(px(22.)).py(px(10.));
+                if list.is_empty() {
+                    listing = listing.child(div().py(px(18.)).text_center().text_size(px(12.)).text_color(t.muted).child("还没有模板，在下面新建一个。"));
+                }
                 for (i, tp) in list.iter().enumerate() {
-                    b = b.child(
+                    listing = listing.child(
                         row(SharedString::from(format!("tp-{i}")))
-                            .child(div().w(px(120.)).flex_none().font_weight(FontWeight::SEMIBOLD).child(tp.name.clone()))
+                            .child(
+                                div()
+                                    .w(px(120.))
+                                    .flex_none()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(tp.name.clone()),
+                            )
                             .child(
                                 div()
                                     .flex_1()
@@ -1788,18 +1803,47 @@ impl MailApp {
                             ))),
                     );
                 }
-                b = b.child(div().h(px(1.)).bg(t.border_soft).my(px(8.))).child(field_box(t, f1).child(div().flex_1().child(name.clone()))).child(
-                    div()
-                        .h(px(200.))
-                        .p(px(10.))
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(if f2 { t.accent } else { t.border })
-                        .bg(t.paper)
-                        .text_size(px(13.))
-                        .text_color(t.ink)
-                        .child(tb.clone()),
-                );
+                let form = div()
+                    .flex()
+                    .flex_col()
+                    .flex_none()
+                    .gap(px(6.))
+                    .px(px(22.))
+                    .pt(px(10.))
+                    .pb(px(14.))
+                    .border_t_1()
+                    .border_color(t.border_soft)
+                    .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).child("新建模板"))
+                    .child(field_box(t, f1).flex_none().child(div().flex_1().child(name.clone())))
+                    .child(
+                        div()
+                            .h(px(160.))
+                            .flex_none()
+                            .p(px(10.))
+                            .rounded(px(8.))
+                            .border_1()
+                            .border_color(if f2 { t.accent } else { t.border })
+                            .bg(t.paper)
+                            .text_size(px(13.))
+                            .text_color(t.ink)
+                            .child(tb.clone()),
+                    );
+                let b = div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .child(
+                        div()
+                            .flex_none()
+                            .px(px(22.))
+                            .pt(px(12.))
+                            .text_size(px(11.5))
+                            .text_color(t.muted)
+                            .child("在写信窗口点「模板」插入。Tab 在名称和正文之间切换。"),
+                    )
+                    .child(listing)
+                    .child(form);
                 let footer = modal_footer(t)
                     .child(div().flex_1())
                     .child(button("tp-add", t, Kind::Primary, Some("plus"), "添加模板", false).on_click(cx.listener(|a, _, w, cx| a.add_template(w, cx))));

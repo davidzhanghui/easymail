@@ -265,6 +265,17 @@ impl MailApp {
                         "toggle-sync",
                         cx,
                     ));
+                    // 服务器支持 IMAP NOTIFY 时所有文件夹已经是实时的，不用勾选
+                    if f.role != "inbox" && !self.eng.notify_supported(f.account_id) {
+                        let watched = crate::core::engine::Engine::watched_folders(&self.store, f.account_id).contains(&fid);
+                        p = p.child(item(
+                            "fm-watch",
+                            if watched { "eyeOff" } else { "clock" },
+                            if watched { "取消实时监听".into() } else { "实时监听此文件夹".into() },
+                            "toggle-watch",
+                            cx,
+                        ));
+                    }
                 }
                 if f.role.is_empty() || local {
                     p = p.child(menu_sep(t)).child(item("fm-new", "plus", "新建子文件夹…".into(), "new-sub", cx));
