@@ -5,7 +5,7 @@
 
 use super::theme::{hex_css, theme};
 use super::widgets::*;
-use super::{fmt_full, fmt_size, SANS, SERIF};
+use super::{fmt_full, fmt_size, icon, SANS, SERIF};
 use crate::core::db::Store;
 use crate::core::model::{addrs_text, Detail};
 use crate::core::queries;
@@ -20,6 +20,9 @@ pub struct ReaderWindow {
     store: Store,
     wid: u64,
     text_mode: bool,
+    /// 这封信临时放行远程图片
+    remote_ok: bool,
+    has_remote: bool,
     doc: Option<(u64, Arc<str>)>,
 }
 
@@ -41,7 +44,8 @@ pub fn open(store: &Store, id: i64, cx: &mut App) -> anyhow::Result<()> {
         },
         move |window, cx| {
             let wid = window.window_handle().window_id().as_u64();
-            let view = cx.new(|_| ReaderWindow { d, store, wid, text_mode: false, doc: None });
+            let view =
+                cx.new(|_| ReaderWindow { has_remote: webview::has_remote_content(&d.html), d, store, wid, text_mode: false, remote_ok: false, doc: None });
             // 点正文里的链接：导航代理记下来，这里轮询取走
             let weak = view.downgrade();
             window
@@ -86,7 +90,9 @@ impl Render for ReaderWindow {
         let t = theme(cx).clone();
         let d = &self.d;
         let show_html = !d.html.is_empty() && !self.text_mode;
-        let remote = crate::core::queries::remote_allowed(&self.store, &d.from.address);
+        let remote = self.remote_ok || crate::core::queries::remote_allowed(&self.store, &d.from.address);
+        let blocked = show_html && !remote && self.has_remote;
+        let from_addr = d.from.address.clone();
         let dark_mail = t.dark && show_html && self.store.get_kv("dark_mail").as_deref() != Some("0");
         let key = {
             use std::hash::{Hash, Hasher};
@@ -140,14 +146,43 @@ impl Render for ReaderWindow {
                     .child(meta("时间", fmt_full(d.date)))
                     .when(!files.is_empty(), |x| x.child(meta("附件", files.join("；")))),
             )
-            .child(div().flex().flex_none().items_center().justify_end().px(px(24.)).h(px(30.)).when(!d.html.is_empty(), |x| {
-                x.child(button("rw-mode", &t, Kind::Ghost, None, if self.text_mode { "原始排版" } else { "纯文本" }, true).on_click(cx.listener(
-                    |a, _, _, cx| {
-                        a.text_mode = !a.text_mode;
-                        cx.notify();
-                    },
-                )))
-            }))
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(24.))
+                    .h(px(34.))
+                    .when(blocked, |x| {
+                        x.child(icon("image", 13., t.muted))
+                            .child(div().text_size(px(12.)).text_color(t.ink_2).child("为保护隐私，已阻止加载远程图片与追踪像素。"))
+                            .child(button("rw-show", &t, Kind::Secondary, None, "显示图片", true).on_click(cx.listener(|a, _, _, cx| {
+                                a.remote_ok = true;
+                                cx.notify();
+                            })))
+                            .when(!from_addr.is_empty(), |x| {
+                                let addr = from_addr.clone();
+                                x.child(button("rw-allow", &t, Kind::Ghost, None, "总是显示此发件人", true).on_click(cx.listener(move |a, _, _, cx| {
+                                    let _ = a.store.w().execute(
+                                        "INSERT OR IGNORE INTO remote_allow (address, created_at) VALUES (?, ?)",
+                                        rusqlite::params![addr.to_lowercase(), crate::core::db::now_ms()],
+                                    );
+                                    a.remote_ok = true;
+                                    cx.notify();
+                                })))
+                            })
+                    })
+                    .child(div().flex_1())
+                    .when(!d.html.is_empty(), |x| {
+                        x.child(button("rw-mode", &t, Kind::Ghost, None, if self.text_mode { "原始排版" } else { "纯文本" }, true).on_click(cx.listener(
+                            |a, _, _, cx| {
+                                a.text_mode = !a.text_mode;
+                                cx.notify();
+                            },
+                        )))
+                    }),
+            )
             .child(
                 div()
                     .id("rw-body")
