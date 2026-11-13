@@ -1117,6 +1117,7 @@ impl MailApp {
                         "queued" if it.attempts > 0 => format!("等待重试 · {}", fmt_full(it.send_at)),
                         "queued" => format!("计划 {} 发出", fmt_full(it.send_at)),
                         "sending" => "发送中…".into(),
+                        "accepted" => "服务器已收下，正在存「已发送」…".into(),
                         _ => "发送失败".into(),
                     };
                     b = b.child(
@@ -1134,7 +1135,7 @@ impl MailApp {
                                     .child(div().text_size(px(11.)).text_color(t.muted).child(format!("{} · {}", it.rcpt, state)))
                                     .when(!it.last_error.is_empty(), |x| x.child(div().text_size(px(11.)).text_color(t.danger).child(it.last_error.clone()))),
                             )
-                            .when(it.state != "sending", |x| {
+                            .when(it.state != "sending" && it.state != "accepted", |x| {
                                 x.child(
                                     button(
                                         SharedString::from(format!("ob-now-{i}")),
