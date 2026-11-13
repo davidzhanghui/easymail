@@ -971,7 +971,7 @@ impl MailApp {
             cx.notify();
         }));
         let Some(Modal::Panel(p)) = &self.modal else { return div().into_any_element() };
-        let body = div().id("panel-body").px(px(22.)).py(px(14.)).max_h(px(520.)).overflow_y_scroll().flex().flex_col().gap(px(6.));
+        let body = div().id("panel-body").px(px(22.)).py(px(14.)).flex_1().min_h(px(0.)).max_h(px(520.)).overflow_y_scroll().flex().flex_col().gap(px(6.));
         let row = |id: SharedString| {
             div().id(id).flex().items_center().gap(px(10.)).px(px(8.)).py(px(6.)).rounded(px(7.)).text_size(px(12.5)).hover(|s| s.bg(t.row_hover))
         };
