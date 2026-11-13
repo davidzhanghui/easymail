@@ -1983,7 +1983,7 @@ impl Render for MailApp {
                     .text_color(if tt.error { gpui::white() } else { t.toast_fg })
                     .text_size(px(12.5))
                     .shadow(vec![BoxShadow { color: t.shadow, offset: point(px(0.), px(6.)), blur_radius: px(20.), spread_radius: px(0.) }])
-                    .child(div().flex_1().child(tt.msg.clone()))
+                    .child(div().flex_1().child(crate::i18n::tr(&tt.msg).into_owned()))
                     .children(action),
             );
         }

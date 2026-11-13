@@ -426,7 +426,7 @@ impl Element for TextEl {
         let scroll0 = input.scroll;
         let style = window.text_style();
         let (text, color) = if content.is_empty() {
-            (input.placeholder.clone(), t.placeholder)
+            (crate::i18n::tr_shared(input.placeholder.clone()), t.placeholder)
         } else if input.masked {
             (SharedString::from("•".repeat(content.chars().count())), t.text)
         } else {

@@ -123,7 +123,7 @@ impl Render for Sidebar {
                     .when(active, |d| d.bg(t.accent_soft).font_weight(FontWeight::SEMIBOLD))
                     .hover(|s| s.bg(if active { t.accent_soft } else { t.row_hover }))
                     .child(icon(view_icon(v), 14., if active { t.accent } else { t.muted }))
-                    .child(div().flex_1().child(view_label(v)))
+                    .child(div().flex_1().child(crate::i18n::tr(view_label(v)).into_owned()))
                     .when(n > 0, |d| {
                         d.child(
                             div()

@@ -1,6 +1,6 @@
 diff -ruN -x . gpui-0.2.2/src/elements/text.rs vendor/gpui/src/elements/text.rs
---- gpui-0.2.2/src/elements/text.rs	2006-07-24 09:21:28
-+++ vendor/gpui/src/elements/text.rs	2026-11-07 23:10:44
+--- gpui-0.2.2/src/elements/text.rs	2026-11-13 08:26:09
++++ vendor/gpui/src/elements/text.rs	2026-11-13 08:26:09
 @@ -2,7 +2,7 @@
      ActiveTooltip, AnyView, App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId,
      HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
@@ -23,7 +23,37 @@ diff -ruN -x . gpui-0.2.2/src/elements/text.rs vendor/gpui/src/elements/text.rs
      }
  
      fn paint(
-@@ -112,10 +112,10 @@
+@@ -66,11 +66,18 @@
+     }
+ }
+ 
++/// [easymail patch] 界面文字翻译钩子：应用启动时设置，返回 Some 就用译文替换要画的文字（见 src/i18n.rs）
++pub static TEXT_HOOK: std::sync::OnceLock<fn(&str) -> Option<String>> = std::sync::OnceLock::new();
++
++fn hooked(s: &str) -> Option<SharedString> {
++    TEXT_HOOK.get().and_then(|f| f(s)).map(SharedString::from)
++}
++
+ impl IntoElement for &'static str {
+-    type Element = Self;
++    type Element = SharedString;
+ 
+     fn into_element(self) -> Self::Element {
+-        self
++        hooked(self).unwrap_or_else(|| self.into())
+     }
+ }
+ 
+@@ -78,7 +85,7 @@
+     type Element = SharedString;
+ 
+     fn into_element(self) -> Self::Element {
+-        self.into()
++        hooked(&self).unwrap_or_else(|| self.into())
+     }
+ }
+ 
+@@ -112,10 +119,10 @@
          _inspector_id: Option<&InspectorElementId>,
          bounds: Bounds<Pixels>,
          text_layout: &mut Self::RequestLayoutState,
@@ -36,7 +66,16 @@ diff -ruN -x . gpui-0.2.2/src/elements/text.rs vendor/gpui/src/elements/text.rs
      }
  
      fn paint(
-@@ -279,10 +279,10 @@
+@@ -136,7 +143,7 @@
+     type Element = Self;
+ 
+     fn into_element(self) -> Self::Element {
+-        self
++        hooked(&self).unwrap_or(self)
+     }
+ }
+ 
+@@ -279,10 +286,10 @@
          _inspector_id: Option<&InspectorElementId>,
          bounds: Bounds<Pixels>,
          _: &mut Self::RequestLayoutState,
@@ -49,7 +88,7 @@ diff -ruN -x . gpui-0.2.2/src/elements/text.rs vendor/gpui/src/elements/text.rs
      }
  
      fn paint(
-@@ -318,8 +318,27 @@
+@@ -318,8 +325,27 @@
      wrap_width: Option<Pixels>,
      size: Option<Size<Pixels>>,
      bounds: Option<Bounds<Pixels>>,
@@ -77,7 +116,7 @@ diff -ruN -x . gpui-0.2.2/src/elements/text.rs vendor/gpui/src/elements/text.rs
  impl TextLayout {
      fn layout(
          &self,
-@@ -408,6 +427,7 @@
+@@ -408,6 +434,7 @@
                          wrap_width,
                          size: Some(Size::default()),
                          bounds: None,
@@ -85,7 +124,7 @@ diff -ruN -x . gpui-0.2.2/src/elements/text.rs vendor/gpui/src/elements/text.rs
                      });
                      return Size::default();
                  };
-@@ -426,6 +446,7 @@
+@@ -426,6 +453,7 @@
                      wrap_width,
                      size: Some(size),
                      bounds: None,
@@ -93,7 +132,7 @@ diff -ruN -x . gpui-0.2.2/src/elements/text.rs vendor/gpui/src/elements/text.rs
                  });
  
                  size
-@@ -433,13 +454,14 @@
+@@ -433,13 +461,14 @@
          })
      }
  
@@ -109,7 +148,7 @@ diff -ruN -x . gpui-0.2.2/src/elements/text.rs vendor/gpui/src/elements/text.rs
      }
  
      fn paint(&self, text: &str, window: &mut Window, cx: &mut App) {
-@@ -502,7 +524,10 @@
+@@ -502,7 +531,10 @@
                  line_origin.y = line_bottom;
                  line_start_ix += line.len() + 1;
              } else {
@@ -121,7 +160,7 @@ diff -ruN -x . gpui-0.2.2/src/elements/text.rs vendor/gpui/src/elements/text.rs
                  match line.index_for_position(position_within_line, line_height) {
                      Ok(index_within_line) => return Ok(line_start_ix + index_within_line),
                      Err(index_within_line) => return Err(line_start_ix + index_within_line),
-@@ -537,7 +562,10 @@
+@@ -537,7 +569,10 @@
                  continue;
              } else {
                  let ix_within_line = index - line_start_ix;
@@ -134,8 +173,8 @@ diff -ruN -x . gpui-0.2.2/src/elements/text.rs vendor/gpui/src/elements/text.rs
          }
  
 diff -ruN -x . gpui-0.2.2/src/platform/linux/platform.rs vendor/gpui/src/platform/linux/platform.rs
---- gpui-0.2.2/src/platform/linux/platform.rs	2006-07-24 09:21:28
-+++ vendor/gpui/src/platform/linux/platform.rs	2026-11-07 23:10:44
+--- gpui-0.2.2/src/platform/linux/platform.rs	2026-11-13 08:26:09
++++ vendor/gpui/src/platform/linux/platform.rs	2026-11-13 08:26:09
 @@ -723,6 +723,7 @@
              CursorStyle::DragLink => &["alias"],
              CursorStyle::DragCopy => &["copy"],
@@ -145,8 +184,8 @@ diff -ruN -x . gpui-0.2.2/src/platform/linux/platform.rs vendor/gpui/src/platfor
                  #[cfg(debug_assertions)]
                  panic!("CursorStyle::None should be handled separately in the client");
 diff -ruN -x . gpui-0.2.2/src/platform/linux/wayland.rs vendor/gpui/src/platform/linux/wayland.rs
---- gpui-0.2.2/src/platform/linux/wayland.rs	2006-07-24 09:21:28
-+++ vendor/gpui/src/platform/linux/wayland.rs	2026-11-07 23:10:44
+--- gpui-0.2.2/src/platform/linux/wayland.rs	2026-11-13 08:26:09
++++ vendor/gpui/src/platform/linux/wayland.rs	2026-11-13 08:26:09
 @@ -35,6 +35,7 @@
              CursorStyle::DragLink => Shape::Alias,
              CursorStyle::DragCopy => Shape::Copy,
@@ -156,8 +195,8 @@ diff -ruN -x . gpui-0.2.2/src/platform/linux/wayland.rs vendor/gpui/src/platform
                  #[cfg(debug_assertions)]
                  panic!("CursorStyle::None should be handled separately in the client");
 diff -ruN -x . gpui-0.2.2/src/platform/mac/events.rs vendor/gpui/src/platform/mac/events.rs
---- gpui-0.2.2/src/platform/mac/events.rs	2006-07-24 09:21:28
-+++ vendor/gpui/src/platform/mac/events.rs	2026-11-07 23:10:44
+--- gpui-0.2.2/src/platform/mac/events.rs	2026-11-13 08:26:09
++++ vendor/gpui/src/platform/mac/events.rs	2026-11-13 08:26:09
 @@ -213,6 +213,20 @@
                          _ => None,
                      }
@@ -180,8 +219,8 @@ diff -ruN -x . gpui-0.2.2/src/platform/mac/events.rs vendor/gpui/src/platform/ma
                      let phase = match native_event.phase() {
                          NSEventPhase::NSEventPhaseMayBegin | NSEventPhase::NSEventPhaseBegan => {
 diff -ruN -x . gpui-0.2.2/src/platform/mac/platform.rs vendor/gpui/src/platform/mac/platform.rs
---- gpui-0.2.2/src/platform/mac/platform.rs	2006-07-24 09:21:28
-+++ vendor/gpui/src/platform/mac/platform.rs	2026-11-07 23:10:44
+--- gpui-0.2.2/src/platform/mac/platform.rs	2026-11-13 08:26:09
++++ vendor/gpui/src/platform/mac/platform.rs	2026-11-13 08:26:09
 @@ -749,6 +749,11 @@
                      if let Some(prompt) = options.prompt {
                          let _: () = msg_send![panel, setPrompt: ns_string(&prompt)];
@@ -228,8 +267,8 @@ diff -ruN -x . gpui-0.2.2/src/platform/mac/platform.rs vendor/gpui/src/platform/
 +    if ptr == 0 { unsafe { msg_send![class!(NSCursor), openHandCursor] } } else { ptr as id }
  }
 diff -ruN -x . gpui-0.2.2/src/platform/mac/text_system.rs vendor/gpui/src/platform/mac/text_system.rs
---- gpui-0.2.2/src/platform/mac/text_system.rs	2006-07-24 09:21:28
-+++ vendor/gpui/src/platform/mac/text_system.rs	2026-11-07 23:10:44
+--- gpui-0.2.2/src/platform/mac/text_system.rs	2026-11-13 08:26:09
++++ vendor/gpui/src/platform/mac/text_system.rs	2026-11-13 08:26:09
 @@ -22,7 +22,8 @@
  use core_text::{
      font::CTFont,
@@ -490,8 +529,8 @@ diff -ruN -x . gpui-0.2.2/src/platform/mac/text_system.rs vendor/gpui/src/platfo
                      .zwnjs_scratch_space
                      .binary_search_by(|&it| it.cmp(&glyph_utf16_ix));
 diff -ruN -x . gpui-0.2.2/src/platform/mac/window.rs vendor/gpui/src/platform/mac/window.rs
---- gpui-0.2.2/src/platform/mac/window.rs	2006-07-24 09:21:28
-+++ vendor/gpui/src/platform/mac/window.rs	2026-11-12 00:06:41
+--- gpui-0.2.2/src/platform/mac/window.rs	2026-11-13 08:26:09
++++ vendor/gpui/src/platform/mac/window.rs	2026-11-13 08:26:09
 @@ -166,6 +166,10 @@
                      handle_view_event as extern "C" fn(&Object, Sel, id),
                  );
@@ -570,8 +609,8 @@ diff -ruN -x . gpui-0.2.2/src/platform/mac/window.rs vendor/gpui/src/platform/ma
          }
      }
 diff -ruN -x . gpui-0.2.2/src/platform/windows/util.rs vendor/gpui/src/platform/windows/util.rs
---- gpui-0.2.2/src/platform/windows/util.rs	2006-07-24 09:21:28
-+++ vendor/gpui/src/platform/windows/util.rs	2026-11-07 23:10:44
+--- gpui-0.2.2/src/platform/windows/util.rs	2026-11-13 08:26:09
++++ vendor/gpui/src/platform/windows/util.rs	2026-11-13 08:26:09
 @@ -118,6 +118,7 @@
      static SIZEWE: OnceLock<SafeCursor> = OnceLock::new();
      static SIZENS: OnceLock<SafeCursor> = OnceLock::new();
@@ -589,8 +628,8 @@ diff -ruN -x . gpui-0.2.2/src/platform/windows/util.rs vendor/gpui/src/platform/
          _ => (&ARROW, IDC_ARROW),
      };
 diff -ruN -x . gpui-0.2.2/src/platform.rs vendor/gpui/src/platform.rs
---- gpui-0.2.2/src/platform.rs	2006-07-24 09:21:28
-+++ vendor/gpui/src/platform.rs	2026-11-07 23:10:44
+--- gpui-0.2.2/src/platform.rs	2026-11-13 08:26:09
++++ vendor/gpui/src/platform.rs	2026-11-13 08:26:09
 @@ -1326,7 +1326,7 @@
  }
  
@@ -639,8 +678,8 @@ diff -ruN -x . gpui-0.2.2/src/platform.rs vendor/gpui/src/platform.rs
                  SmallVec::from_elem(Frame::new(buffer), 1)
              }
 diff -ruN -x . gpui-0.2.2/src/style.rs vendor/gpui/src/style.rs
---- gpui-0.2.2/src/style.rs	2006-07-24 09:21:28
-+++ vendor/gpui/src/style.rs	2026-11-07 23:10:44
+--- gpui-0.2.2/src/style.rs	2026-11-13 08:26:09
++++ vendor/gpui/src/style.rs	2026-11-13 08:26:09
 @@ -264,6 +264,9 @@
      /// Equivalent to the Tailwind `grid-cols-<number>`
      pub grid_cols: Option<u16>,
@@ -660,8 +699,8 @@ diff -ruN -x . gpui-0.2.2/src/style.rs vendor/gpui/src/style.rs
  
              #[cfg(debug_assertions)]
 diff -ruN -x . gpui-0.2.2/src/styled.rs vendor/gpui/src/styled.rs
---- gpui-0.2.2/src/styled.rs	2006-07-24 09:21:28
-+++ vendor/gpui/src/styled.rs	2026-11-07 23:10:44
+--- gpui-0.2.2/src/styled.rs	2026-11-13 08:26:09
++++ vendor/gpui/src/styled.rs	2026-11-13 08:26:09
 @@ -660,6 +660,12 @@
          self
      }
@@ -676,8 +715,8 @@ diff -ruN -x . gpui-0.2.2/src/styled.rs vendor/gpui/src/styled.rs
      fn grid_rows(mut self, rows: u16) -> Self {
          self.style().grid_rows = Some(rows);
 diff -ruN -x . gpui-0.2.2/src/taffy.rs vendor/gpui/src/taffy.rs
---- gpui-0.2.2/src/taffy.rs	2006-07-24 09:21:28
-+++ vendor/gpui/src/taffy.rs	2026-11-07 23:10:44
+--- gpui-0.2.2/src/taffy.rs	2026-11-13 08:26:09
++++ vendor/gpui/src/taffy.rs	2026-11-13 08:26:09
 @@ -309,7 +309,7 @@
              unit: &Option<u16>,
          ) -> Vec<taffy::GridTemplateComponent<T>> {
@@ -704,8 +743,8 @@ diff -ruN -x . gpui-0.2.2/src/taffy.rs vendor/gpui/src/taffy.rs
                  .grid_location
                  .as_ref()
 diff -ruN -x . gpui-0.2.2/src/text_system/line.rs vendor/gpui/src/text_system/line.rs
---- gpui-0.2.2/src/text_system/line.rs	2006-07-24 09:21:28
-+++ vendor/gpui/src/text_system/line.rs	2026-11-07 23:10:44
+--- gpui-0.2.2/src/text_system/line.rs	2026-11-13 08:26:09
++++ vendor/gpui/src/text_system/line.rs	2026-11-13 08:26:09
 @@ -479,7 +479,6 @@
                              },
                              *background_color,
@@ -753,8 +792,8 @@ diff -ruN -x . gpui-0.2.2/src/text_system/line.rs vendor/gpui/src/text_system/li
          if let Some((mut background_origin, background_color)) = current_background.take() {
              if last_line_end_x == background_origin.x {
 diff -ruN -x . gpui-0.2.2/src/text_system/line_layout.rs vendor/gpui/src/text_system/line_layout.rs
---- gpui-0.2.2/src/text_system/line_layout.rs	2006-07-24 09:21:28
-+++ vendor/gpui/src/text_system/line_layout.rs	2026-11-07 23:10:44
+--- gpui-0.2.2/src/text_system/line_layout.rs	2026-11-13 08:26:09
++++ vendor/gpui/src/text_system/line_layout.rs	2026-11-13 08:26:09
 @@ -170,7 +170,12 @@
                      last_candidate_x = x;
                  }
@@ -770,8 +809,8 @@ diff -ruN -x . gpui-0.2.2/src/text_system/line_layout.rs vendor/gpui/src/text_sy
                      last_candidate_x = x;
                  }
 diff -ruN -x . gpui-0.2.2/src/text_system/line_wrapper.rs vendor/gpui/src/text_system/line_wrapper.rs
---- gpui-0.2.2/src/text_system/line_wrapper.rs	2006-07-24 09:21:28
-+++ vendor/gpui/src/text_system/line_wrapper.rs	2026-11-07 23:10:44
+--- gpui-0.2.2/src/text_system/line_wrapper.rs	2026-11-13 08:26:09
++++ vendor/gpui/src/text_system/line_wrapper.rs	2026-11-13 08:26:09
 @@ -64,8 +64,13 @@
                                  last_candidate_width = width;
                              }

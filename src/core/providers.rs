@@ -375,7 +375,7 @@ pub fn role_label(role: &str) -> Option<&'static str> {
 }
 
 pub fn folder_label(role: &str, name: &str) -> String {
-    role_label(role).map(String::from).unwrap_or_else(|| name.to_string())
+    role_label(role).map(|s| crate::i18n::tr(s).into_owned()).unwrap_or_else(|| name.to_string())
 }
 
 /// 账号颜色（侧栏圆点），值是主题色名。

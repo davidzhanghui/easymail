@@ -722,6 +722,25 @@ impl AccountsModal {
         let wide = |e: &Entity<LineInput>| self.field(t, e, window, cx).flex_none().w(px(320.)).into_any_element();
         let autostart = super::macos::autostart_enabled();
         div()
+            .child(group(t, "语言 / Language"))
+            .child(card(t, vec![setting_row(
+                t,
+                "界面语言",
+                "Interface language · 立即生效",
+                {
+                    let cur = crate::i18n::pref(self.eng.store());
+                    let mut row = div().flex().gap(px(6.));
+                    for (v, label) in [("auto", "跟随系统"), ("zh", "简体中文"), ("en", "English")] {
+                        row = row.child(chip(SharedString::from(format!("lang-{v}")), t, label, cur == v).on_click(cx.listener(move |m, _, _, cx| {
+                            m.eng.store().set_kv("lang", v);
+                            crate::i18n::apply(m.eng.store());
+                            cx.emit(AccountsEvent::Changed);
+                            cx.notify();
+                        })));
+                    }
+                    row.into_any_element()
+                },
+            )]))
             .child(group(t, "同步与网络"))
             .child(card(t, vec![
                 setting_row(t, "代理地址", "收发邮件时使用，留空则直连", wide(&s.proxy)),
@@ -781,9 +800,7 @@ impl AccountsModal {
                 setting_row(t, "Google Client ID", "Gmail 走 OAuth 登录时需要", wide(&s.google_client_id)),
                 setting_row(t, "Google Client Secret", "与上面的 Client ID 配套", wide(&s.google_client_secret)),
             ]))
-            .child(div().mt(px(8.)).px(px(4.)).text_size(px(11.)).line_height(px(17.)).text_color(t.muted).child(
-                "Google 不允许开源客户端内置密钥，需要填你自己在 Google Cloud 创建的「桌面应用」凭据；不填则继续使用应用专用密码。Microsoft 内置应用在 Azure 中注册为「移动和桌面应用」，重定向 http://localhost。",
-            ))
+            .child(div().mt(px(8.)).px(px(4.)).text_size(px(11.)).line_height(px(17.)).text_color(t.muted).child("Google 不允许开源客户端内置密钥，需要填你自己在 Google Cloud 创建的「桌面应用」凭据；不填则继续使用应用专用密码。Microsoft 内置应用在 Azure 中注册为「移动和桌面应用」，重定向 http://localhost。",))
     }
 }
 
@@ -850,15 +867,20 @@ impl Render for AccountsModal {
                                 .text_size(px(12.))
                                 .line_height(px(20.))
                                 .child(div().text_size(px(13.)).text_color(t.ink).child(format!("{} · {}", a.name, a.email)))
-                                .child(div().text_color(t.muted).child(format!(
-                                    "{} · IMAP {}:{} · SMTP {}:{}{}",
-                                    a.provider_name(),
-                                    a.imap_host,
-                                    a.imap_port,
-                                    a.smtp_host,
-                                    a.smtp_port,
-                                    if a.use_proxy { " · 经代理" } else { "" }
-                                )))
+                                .child(
+                                    div().text_color(t.muted).child(
+                                        crate::i18n::tr(&format!(
+                                            "{} · IMAP {}:{} · SMTP {}:{}{}",
+                                            a.provider_name(),
+                                            a.imap_host,
+                                            a.imap_port,
+                                            a.smtp_host,
+                                            a.smtp_port,
+                                            if a.use_proxy { " · 经代理" } else { "" }
+                                        ))
+                                        .into_owned(),
+                                    ),
+                                )
                                 .child(div().text_color(t.muted).child(status))
                                 .when(!a.last_error.is_empty(), |d| d.child(div().text_color(t.danger).child(a.last_error.clone()))),
                         )
@@ -920,7 +942,7 @@ impl Render for AccountsModal {
 
 /// 设置分组标题
 fn group(t: &Theme, title: &'static str) -> Div {
-    div().mt(px(18.)).mb(px(8.)).px(px(4.)).text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(t.ink_2).child(title)
+    div().mt(px(18.)).mb(px(8.)).px(px(4.)).text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(t.ink_2).child(crate::i18n::tr(title).into_owned())
 }
 
 /// 分组卡片：行与行之间用细线分隔
@@ -945,8 +967,8 @@ fn setting_row(t: &Theme, title: &'static str, desc: &'static str, control: AnyE
             div()
                 .flex_1()
                 .min_w_0()
-                .child(div().text_size(px(13.)).text_color(t.ink).child(title))
-                .child(div().mt(px(1.)).text_size(px(11.5)).line_height(px(16.)).text_color(t.muted).child(desc)),
+                .child(div().text_size(px(13.)).text_color(t.ink).child(crate::i18n::tr(title).into_owned()))
+                .child(div().mt(px(1.)).text_size(px(11.5)).line_height(px(16.)).text_color(t.muted).child(crate::i18n::tr(desc).into_owned())),
         )
         .child(div().flex_none().child(control))
         .into_any_element()

@@ -19,7 +19,7 @@ pub enum Kind {
 
 /// 按钮：图标 + 文字。`sm` 为 28px 高的紧凑款。
 pub fn button(id: impl Into<ElementId>, t: &Theme, kind: Kind, ic: Option<&'static str>, label: impl Into<SharedString>, sm: bool) -> Stateful<Div> {
-    let label: SharedString = label.into();
+    let label: SharedString = crate::i18n::tr_shared(label.into());
     let (bg, fg, border, hover) = match kind {
         Kind::Primary => (t.accent, t.on_accent, t.accent, t.accent_deep),
         Kind::Secondary => (t.panel, t.ink_2, t.border, t.row_hover),
@@ -33,7 +33,9 @@ pub fn button(id: impl Into<ElementId>, t: &Theme, kind: Kind, ic: Option<&'stat
     let (tip_bg, tip_fg, tip_border) = (t.toast_bg, t.toast_fg, t.border);
     div()
         .id(id)
-        .when_some(hint, |d, h| d.tooltip(move |_, cx| cx.new(|_| Tip { text: h.into(), bg: tip_bg, fg: tip_fg, border: tip_border }).into()))
+        .when_some(hint, |d, h| {
+            d.tooltip(move |_, cx| cx.new(|_| Tip { text: crate::i18n::tr(h).into_owned().into(), bg: tip_bg, fg: tip_fg, border: tip_border }).into())
+        })
         .flex()
         .flex_none()
         .items_center()
@@ -82,7 +84,7 @@ pub fn chip(id: impl Into<ElementId>, t: &Theme, label: impl Into<SharedString>,
                 d.bg(t.panel).text_color(t.ink_2).border_color(t.border).hover(|s| s.bg(t.row_hover))
             }
         })
-        .child(label.into())
+        .child(crate::i18n::tr_shared(label.into()))
 }
 
 /// 计数徽标
@@ -96,7 +98,7 @@ pub fn badge(t: &Theme, text: impl Into<SharedString>, strong: bool) -> Div {
         .rounded(px(9.))
         .text_size(px(10.5))
         .map(|d| if strong { d.bg(t.accent_soft).text_color(t.accent_deep) } else { d.bg(t.panel_2).text_color(t.muted) })
-        .child(text.into())
+        .child(crate::i18n::tr_shared(text.into()))
 }
 
 pub fn checkbox(id: impl Into<ElementId>, t: &Theme, checked: bool) -> Stateful<Div> {
@@ -121,7 +123,7 @@ pub fn check_row(id: impl Into<ElementId>, t: &Theme, checked: bool, label: impl
         .text_size(px(12.5))
         .text_color(t.ink_2)
         .child(checkbox(ElementId::Name(format!("{id}-box").into()), t, checked))
-        .child(div().flex_1().child(label.into()))
+        .child(div().flex_1().child(crate::i18n::tr_shared(label.into())))
 }
 
 /// 弹层容器（菜单 / 主题切换）。调用方负责定位（absolute + top/right）。
@@ -157,11 +159,11 @@ pub fn menu_row(id: impl Into<ElementId>, t: &Theme, ic: Option<&'static str>, l
         .when(active, |d| d.bg(t.accent_soft))
         .hover(|s| s.bg(t.row_hover))
         .when_some(ic, |d, i| d.child(icon(i, 13., t.muted)))
-        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label.into()))
+        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(crate::i18n::tr_shared(label.into())))
 }
 
 pub fn menu_title(t: &Theme, s: impl Into<SharedString>) -> Div {
-    div().px(px(9.)).pt(px(7.)).pb(px(4.)).text_size(px(10.5)).text_color(t.faint).child(s.into())
+    div().px(px(9.)).pt(px(7.)).pb(px(4.)).text_size(px(10.5)).text_color(t.faint).child(crate::i18n::tr_shared(s.into()))
 }
 
 pub fn menu_sep(t: &Theme) -> Div {
@@ -170,7 +172,7 @@ pub fn menu_sep(t: &Theme) -> Div {
 
 /// 模态外壳：标题、副标题、内容、底栏。点遮罩关闭由调用方决定。
 pub fn modal_shell(t: &Theme, w: f32, title: impl Into<SharedString>, sub: impl Into<SharedString>, close: Stateful<Div>) -> Div {
-    let sub: SharedString = sub.into();
+    let sub: SharedString = crate::i18n::tr_shared(sub.into());
     div()
         .w(px(w))
         .max_w(relative(0.94))
@@ -200,7 +202,7 @@ pub fn modal_shell(t: &Theme, w: f32, title: impl Into<SharedString>, sub: impl 
                     div()
                         .flex_1()
                         .min_w_0()
-                        .child(div().font_family(SERIF).text_size(px(18.)).font_weight(FontWeight::BOLD).child(title.into()))
+                        .child(div().font_family(SERIF).text_size(px(18.)).font_weight(FontWeight::BOLD).child(crate::i18n::tr_shared(title.into())))
                         .when(!sub.is_empty(), |d| d.child(div().text_size(px(11.5)).text_color(t.muted).mt(px(2.)).child(sub))),
                 )
                 .child(close),
@@ -234,11 +236,11 @@ pub fn form_row(t: &Theme, label: impl Into<SharedString>, top: bool) -> Div {
         .gap(px(12.))
         .when(!top, |d| d.items_center())
         .mb(px(10.))
-        .child(div().w(px(84.)).flex_none().text_size(px(12.)).text_color(t.muted).when(top, |d| d.pt(px(9.))).child(label.into()))
+        .child(div().w(px(84.)).flex_none().text_size(px(12.)).text_color(t.muted).when(top, |d| d.pt(px(9.))).child(crate::i18n::tr_shared(label.into())))
 }
 
 pub fn section_title(t: &Theme, s: impl Into<SharedString>) -> Div {
-    div().text_size(px(11.)).text_color(t.muted).mb(px(10.)).mt(px(4.)).child(s.into())
+    div().text_size(px(11.)).text_color(t.muted).mb(px(10.)).mt(px(4.)).child(crate::i18n::tr_shared(s.into()))
 }
 
 pub fn dot(color: Hsla, size: f32) -> Div {
@@ -270,7 +272,7 @@ impl Render for Tip {
 
 /// 给可交互元素加悬停提示
 pub fn tip(b: Stateful<Div>, t: &Theme, text: impl Into<SharedString>) -> Stateful<Div> {
-    let text: SharedString = text.into();
+    let text: SharedString = crate::i18n::tr_shared(text.into());
     let (bg, fg, border) = (t.toast_bg, t.toast_fg, t.border);
     b.tooltip(move |_, cx| cx.new(|_| Tip { text: text.clone(), bg, fg, border }).into())
 }

@@ -202,10 +202,15 @@ impl Render for ImportModal {
                 div()
                     .mt(px(14.))
                     .child(div().h(px(6.)).rounded(px(3.)).bg(t.panel_2).child(div().h_full().rounded(px(3.)).bg(t.accent).w(relative(*percent as f32 / 100.))))
-                    .child(div().mt(px(6.)).text_size(px(12.)).text_color(t.ink_2).child(format!(
-                        "解析中 {percent}% · 已导入 {imported} 封{}",
-                        if *skipped > 0 { format!(" · 跳过重复 {skipped} 封") } else { String::new() }
-                    ))),
+                    .child(
+                        div().mt(px(6.)).text_size(px(12.)).text_color(t.ink_2).child(
+                            crate::i18n::tr(&format!(
+                                "解析中 {percent}% · 已导入 {imported} 封{}",
+                                if *skipped > 0 { format!(" · 跳过重复 {skipped} 封") } else { String::new() }
+                            ))
+                            .into_owned(),
+                        ),
+                    ),
             );
         }
         if let Some(r) = &self.result {

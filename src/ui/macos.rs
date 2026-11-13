@@ -112,7 +112,9 @@ thread_local! {
 }
 
 fn menu_item(mtm: MainThreadMarker, title: &str, action: Option<objc2::runtime::Sel>, target: &TrayTarget) -> Retained<NSMenuItem> {
-    let item = unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &NSString::from_str(title), action, &NSString::from_str("")) };
+    let item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &NSString::from_str(&crate::i18n::tr(title)), action, &NSString::from_str(""))
+    };
     if action.is_some() {
         unsafe { item.setTarget(Some(target)) };
     }
@@ -162,7 +164,7 @@ fn refresh_tray() {
     let auto = autostart_enabled();
     TRAY.with(|t| {
         if let Some(t) = t.borrow().as_ref() {
-            t.unread_item.setTitle(&NSString::from_str(&format!("未读邮件：{n}")));
+            t.unread_item.setTitle(&NSString::from_str(&crate::i18n::tr(&format!("未读邮件：{n}"))));
             t.autostart_item.setState(if auto { NSControlStateValueOn } else { NSControlStateValueOff });
             if let Some(mtm) = MainThreadMarker::new() {
                 if let Some(b) = t.item.button(mtm) {
@@ -221,6 +223,8 @@ pub fn init_notifications() {
 /// 系统通知。打包成 .app 时走 UNUserNotificationCenter（用户在「系统设置 → 通知」里能管理），
 /// 直接 cargo run（没有 bundle）时退回 osascript。
 pub fn notify(title: &str, body: &str) {
+    let (title, body) = (crate::i18n::tr(title).into_owned(), crate::i18n::tr(body).into_owned());
+    let (title, body) = (title.as_str(), body.as_str());
     if std::env::var_os("EASYMAIL_NO_NOTIFY").is_some() {
         return;
     }

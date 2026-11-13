@@ -604,7 +604,7 @@ impl Element for AreaEl {
         let t = theme(cx).clone();
         let input = self.input.read(cx);
         let empty = input.content.is_empty();
-        let text: SharedString = if empty { input.placeholder.clone() } else { input.content.clone().into() };
+        let text: SharedString = if empty { crate::i18n::tr_shared(input.placeholder.clone()) } else { input.content.clone().into() };
         let color = if empty { t.placeholder } else { t.text };
         let font = window.text_style().font();
         let base = TextRun { len: text.len(), font, color, background_color: None, underline: None, strikethrough: None };

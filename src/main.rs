@@ -90,6 +90,8 @@ fn main() {
         }
     };
     let _ = accounts::ensure_local(&store);
+    easymail::i18n::apply(&store);
+    easymail::i18n::install_text_hook();
     // 首次启动探测本机代理（v2ray / Clash / Surge 常见端口），探测到就写进设置
     if std::env::var_os("EASYMAIL_SCRIPT").is_none() {
         easymail::core::tools::init_proxy(&store);

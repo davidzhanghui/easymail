@@ -24,3 +24,4 @@
 | `src/platform/mac/window.rs`（`handle_key_event`） | `performKeyEquivalent:` 时若 GPUIView 不是第一响应者，不再调用自己的 `inputContext handleEvent:`，只跑 GPUI 快捷键回调 | 写信正文的 WKWebView 持有焦点时，方向键会被输入法当成 U+F700–F703 文字提交进正文，显示成方框 |
 | `src/platform/mac/events.rs` | 触摸板捏合缩放转成带 ⌘ 的滚轮事件 | 与 ⌘ + 滚轮缩放共用一条处理路径 |
 | `src/platform.rs`、`src/platform/mac/platform.rs`、`src/platform/linux/*.rs`、`src/platform/windows/util.rs` | 新增 `CursorStyle::Move` 及各平台映射 | 拖动类交互需要「移动」光标 |
+| `src/elements/text.rs`（TEXT_HOOK） | `&str` / `String` / `SharedString` 变成元素之前先过一个全局钩子 `gpui::TEXT_HOOK` | 多语言：英文界面时 `src/i18n.rs` 把所有要画的中文文案按词典替换成英文，不用改每个调用点 |

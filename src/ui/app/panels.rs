@@ -1040,13 +1040,18 @@ impl MailApp {
                                     } else {
                                         format!("{} <{}>", s.name, s.address)
                                     }))
-                                    .child(div().text_size(px(11.)).text_color(t.muted).child(format!(
-                                        "{} 封 · 未读 {} · {} · 最近 {}",
-                                        s.count,
-                                        s.unread,
-                                        fmt_size(s.bytes as u64),
-                                        fmt_full(s.last)
-                                    ))),
+                                    .child(
+                                        div().text_size(px(11.)).text_color(t.muted).child(
+                                            crate::i18n::tr(&format!(
+                                                "{} 封 · 未读 {} · {} · 最近 {}",
+                                                s.count,
+                                                s.unread,
+                                                fmt_size(s.bytes as u64),
+                                                fmt_full(s.last)
+                                            ))
+                                            .into_owned(),
+                                        ),
+                                    ),
                             )
                             .child(button(SharedString::from(format!("snd-v-{i}")), t, Kind::Ghost, None, "查看", true).on_click(cx.listener(
                                 move |a, _, w, cx| {
@@ -1171,11 +1176,16 @@ impl MailApp {
                                 let _ = rules::set_enabled(&a.store, id, !on);
                                 a.open_rules(cx);
                             })))
-                            .child(div().flex_1().child(format!(
-                                "{fl}包含「{}」→ {al}{}",
-                                r.value,
-                                if r.action == "move" { format!("「{}」", folder_name(r.target)) } else { String::new() }
-                            )))
+                            .child(
+                                div().flex_1().child(
+                                    crate::i18n::tr(&format!(
+                                        "{fl}包含「{}」→ {al}{}",
+                                        r.value,
+                                        if r.action == "move" { format!("「{}」", folder_name(r.target)) } else { String::new() }
+                                    ))
+                                    .into_owned(),
+                                ),
+                            )
                             .child(div().text_size(px(11.)).text_color(t.muted).child(format!("命中 {}", r.hits)))
                             .child(button(SharedString::from(format!("rule-del-{i}")), t, Kind::Ghost, Some("trash"), "", true).on_click(cx.listener(
                                 move |a, _, _, cx| {
@@ -1254,7 +1264,10 @@ impl MailApp {
                 let b = body
                     .child(
                         div().text_size(px(11.5)).text_color(t.muted).child(
-                            "把一个文件夹里的邮件复制到另一个账号（或本地归档）的文件夹，保留已读 / 星标。原邮件不删除；中断后再点「开始」会从断点继续。",
+                            crate::i18n::tr(
+                                "把一个文件夹里的邮件复制到另一个账号（或本地归档）的文件夹，保留已读 / 星标。原邮件不删除；中断后再点「开始」会从断点继续。",
+                            )
+                            .into_owned(),
                         ),
                     )
                     .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).mt(px(6.)).child("① 从"))
@@ -1671,9 +1684,7 @@ impl MailApp {
                 let (f1, f2) = (pw.read(cx).is_focused(window), pw2.read(cx).is_focused(window));
                 let enc = !pw.read(cx).text().is_empty();
                 let mut b = body
-                    .child(div().text_size(px(12.)).line_height(px(19.)).text_color(t.ink_2).child(
-                        "备份包含数据库快照、每封邮件的原文、发信附件，以及账号凭据的加密密钥。密码留空 = 保存成一个文件夹（不加密）；设置密码 = 保存成单个 .embak 加密文件，密钥也在密文里。",
-                    ))
+                    .child(div().text_size(px(12.)).line_height(px(19.)).text_color(t.ink_2).child("备份包含数据库快照、每封邮件的原文、发信附件，以及账号凭据的加密密钥。密码留空 = 保存成一个文件夹（不加密）；设置密码 = 保存成单个 .embak 加密文件，密钥也在密文里。",))
                     .child(field_box(t, f1).child(div().flex_1().child(pw.clone())))
                     .child(field_box(t, f2).child(div().flex_1().child(pw2.clone())))
                     .child(div().text_size(px(11.5)).text_color(t.muted).child("密码无法找回：忘记密码就无法恢复这份备份。"));

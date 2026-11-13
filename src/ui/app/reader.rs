@@ -88,12 +88,15 @@ impl MailApp {
         if x.auth.failed() {
             rows.push(
                 banner(t.danger, "shield")
-                    .child(format!(
-                        "发件人身份验证未通过（SPF {} · DKIM {} · DMARC {}），这封信可能是伪造的，请谨慎对待其中的链接和附件。",
-                        or_dash(&x.auth.spf),
-                        or_dash(&x.auth.dkim),
-                        or_dash(&x.auth.dmarc)
-                    ))
+                    .child(
+                        crate::i18n::tr(&format!(
+                            "发件人身份验证未通过（SPF {} · DKIM {} · DMARC {}），这封信可能是伪造的，请谨慎对待其中的链接和附件。",
+                            or_dash(&x.auth.spf),
+                            or_dash(&x.auth.dkim),
+                            or_dash(&x.auth.dmarc)
+                        ))
+                        .into_owned(),
+                    )
                     .into_any_element(),
             );
         }
@@ -101,10 +104,13 @@ impl MailApp {
             let (shown, real) = &x.phishing[0];
             rows.push(
                 banner(t.danger, "shield")
-                    .child(format!(
-                        "可疑链接：显示为 {shown}，实际指向 {real}{}",
-                        if x.phishing.len() > 1 { format!(" 等 {} 处", x.phishing.len()) } else { String::new() }
-                    ))
+                    .child(
+                        crate::i18n::tr(&format!(
+                            "可疑链接：显示为 {shown}，实际指向 {real}{}",
+                            if x.phishing.len() > 1 { format!(" 等 {} 处", x.phishing.len()) } else { String::new() }
+                        ))
+                        .into_owned(),
+                    )
                     .into_any_element(),
             );
         }
@@ -152,11 +158,12 @@ impl MailApp {
                 } else {
                     inv.summary.clone()
                 }))
-                .child(div().text_size(px(12.5)).text_color(t.ink_2).child(format!(
-                    "时间：{}{}",
-                    inv.when_text(),
-                    if inv.rrule.is_empty() { String::new() } else { "（重复活动）".into() }
-                )));
+                .child(
+                    div().text_size(px(12.5)).text_color(t.ink_2).child(
+                        crate::i18n::tr(&format!("时间：{}{}", inv.when_text(), if inv.rrule.is_empty() { String::new() } else { "（重复活动）".into() }))
+                            .into_owned(),
+                    ),
+                );
             if !inv.location.is_empty() {
                 card = card.child(div().text_size(px(12.5)).text_color(t.ink_2).child(format!("地点：{}", inv.location)));
             }
@@ -240,11 +247,14 @@ impl MailApp {
         if x.pixels > 0 {
             rows.push(
                 banner(t.muted, "eyeOff")
-                    .child(format!(
-                        "已拦截 {} 个追踪像素（{}），对方无法得知你是否打开了这封信。",
-                        x.pixels,
-                        x.tracker_hosts.iter().take(3).cloned().collect::<Vec<_>>().join("、")
-                    ))
+                    .child(
+                        crate::i18n::tr(&format!(
+                            "已拦截 {} 个追踪像素（{}），对方无法得知你是否打开了这封信。",
+                            x.pixels,
+                            x.tracker_hosts.iter().take(3).cloned().collect::<Vec<_>>().join("、")
+                        ))
+                        .into_owned(),
+                    )
                     .into_any_element(),
             );
         }
@@ -377,7 +387,11 @@ impl MailApp {
             );
 
         let meta_row = |k: &'static str, v: AnyElement| {
-            div().flex().gap(px(8.)).child(div().w(px(52.)).flex_none().text_color(t.muted).child(k)).child(div().flex_1().min_w_0().child(v))
+            div()
+                .flex()
+                .gap(px(8.))
+                .child(div().w(px(52.)).flex_none().text_color(t.muted).child(crate::i18n::tr(k).into_owned()))
+                .child(div().flex_1().min_w_0().child(v))
         };
         let mono = |s: String| div().font_family(MONO).text_size(px(11.5)).child(s).into_any_element();
         let header = div()
@@ -414,7 +428,10 @@ impl MailApp {
                             .items_center()
                             .gap(px(6.))
                             .child(dot(t.named(&d.account_color), 7.))
-                            .child(format!("{} / {}", if local { "本地归档".to_string() } else { d.account_email.clone() }, d.folder_label))
+                            .child(
+                                crate::i18n::tr(&format!("{} / {}", if local { "本地归档".to_string() } else { d.account_email.clone() }, d.folder_label))
+                                    .into_owned(),
+                            )
                             .into_any_element(),
                     )),
             )

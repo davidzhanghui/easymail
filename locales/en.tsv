@@ -1,0 +1,643 @@
+ · {} 个账号	 · {} accounts
+ · 代理	 · proxy
+ · 已存入「已发送」	 · saved to "Sent"
+ · 经代理	 · via proxy
+ · 跳过重复 {} 封	 · {} duplicates skipped
+ 等 {} 处	 and {} more
+(无主题)	(no subject)
+(无标题活动)	(untitled event)
+---------- 转发的邮件 ----------	---------- Forwarded message ----------
+.eml / .mbox → 本地归档，不写回邮箱服务器	.eml / .mbox → local archive; nothing is written back to the mail server
+CSV 表格（Excel 可直接打开）	CSV spreadsheet (opens in Excel)
+E A S Y M A I L  ·  迷 你 邮 件	E A S Y M A I L  ·  M I N I  M A I L
+Gmail OAuth 登录需要	Required for Gmail OAuth sign-in
+Gmail 走 OAuth 登录时需要	Required when signing in to Gmail with OAuth
+Google 不允许开源客户端内置密钥，需要填你自己在 Google Cloud 创建的「桌面应用」凭据；不填则继续使用应用专用密码。Microsoft 内置应用在 Azure 中注册为「移动和桌面应用」，重定向 http://localhost。	Google does not allow open-source clients to embed secrets, so enter your own "Desktop app" credentials from Google Cloud; leave empty to keep using an app password. The built-in Microsoft app is registered in Azure as a "Mobile and desktop application" with redirect http://localhost.
+IMAP 复制，可断点续传	IMAP copy, resumable
+IMAP 收信：{}	IMAP receive: {}
+IMAP 收信：连接成功，{} 个文件夹	IMAP receive: connected, {} folders
+IMAP 服务器	IMAP server
+Maildir / .eml 文件夹	Maildir / .eml folder
+OAuth 登录失败：{}	OAuth sign-in failed: {}
+OAuth 登录（高级）	OAuth sign-in (advanced)
+PDF 文字用本地规则解析，扫描件识别不了；金额请以原件为准	PDF text is parsed with local rules; scanned documents are not recognised. Check amounts against the original.
+SMTP 发信：{}	SMTP send: {}
+SMTP 发信：认证成功	SMTP send: authentication succeeded
+SMTP 服务器	SMTP server
+Shift + 点击	Shift + click
+Tab 切换栏位，回车保存。邮件里出现过的名字会自动识别，这里填的优先；写信时输入姓名也能联想到。	Tab moves between fields, Enter saves. Names seen in mail are detected automatically; what you enter here takes priority and also appears as suggestions when composing.
+⌘ + Enter 发送 · 输入后自动保存草稿	⌘ + Enter to send · drafts are saved automatically
+⌘ + 点击	⌘ + click
+① 从	① From
+② 复制到	② Copy to
+「{}」已全部标为已读	"{}" marked all as read
+「{}」已恢复同步	Sync resumed for "{}"
+「{}」已暂停同步	Sync paused for "{}"
+上一封	Previous
+上一封 [	Previous [
+上次同步 {}	Last synced {}
+上次运行时程序异常退出了，详细信息记录在数据目录的 panic.log，欢迎附上它到 GitHub 提 issue	The app quit unexpectedly last time. Details are in panic.log in the data folder; please attach it when opening a GitHub issue.
+下一封	Next
+下一封 ]	Next ]
+下载 .eml 原文	Download .eml source
+不能跨账号拖动邮件（要复制到别的账号，用「账号间搬家」）	Mail can't be dragged across accounts (use "Move between accounts" to copy to another account)
+与上面的 Client ID 配套	Goes with the Client ID above
+丢弃	Discard
+丢弃这封信？	Discard this message?
+两次输入的密码不一致	The two passwords don't match
+个账号	accounts
+为保护隐私，已阻止加载远程图片与追踪像素。	Remote images and tracking pixels are blocked to protect your privacy.
+主题	Subject
+主题：{}	Subject: {}
+仅「{}」	Only "{}"
+从加密备份恢复	Restore from encrypted backup
+从备份恢复…	Restore from backup…
+从备份恢复…（目录或 .embak 加密备份）	Restore from backup… (folder or encrypted .embak)
+从未	Never
+代理 → 域名解析 → 端口 → TLS → 登录	Proxy → DNS → port → TLS → sign-in
+代理地址	Proxy address
+代理地址格式不对：例如 socks5://127.0.0.1:1080	Invalid proxy address, e.g. socks5://127.0.0.1:1080
+以后会自动显示 {} 的图片	Images from {} will now be shown automatically
+会在邮箱服务器上删除这个文件夹及其中的邮件，无法恢复。	This deletes the folder and its mail on the mail server and cannot be undone.
+会移入各账号的垃圾箱，可在撤销窗口内撤销。	Moved to each account's trash; you can undo within the undo window.
+会话	Conversations
+会话内上一封 / 下一封	Previous / next in conversation
+位置	Location
+你{}	You: {}
+你好	Hello
+保存	Save
+保存中…	Saving…
+保存为草稿	Save as draft
+保存失败：{}	Save failed: {}
+保存的搜索	Saved searches
+保存设置	Save settings
+停留多久标为已读	Mark as read after
+允许	Allow
+先接入一个邮箱。	Add a mailbox first.
+全删	Delete all
+全局	Global
+全选	Select all
+全部	All
+全部回复	Reply all
+全部已读	Mark all read
+全部标为已读	Mark all as read
+全部账号与文件夹	All accounts and folders
+全部邮件	All mail
+公司	Company
+共 {} 项 · ↑↓ 选择 · ↵ 执行 · Esc 关闭 · ⌘K 随时打开	{} items · ↑↓ select · ↵ run · Esc close · ⌘K anytime
+关于{}	About {}
+关闭	Close
+其中 {} 封会被彻底删除	{} of them will be permanently deleted
+其中的邮件会一并从本机删除，无法恢复。	Mail inside will also be removed from this Mac and cannot be recovered.
+再输入一次密码	Re-enter password
+写一封新信	Write a new message
+写信	Compose
+写信 / 回复时自动附在正文后	Appended to the body when composing / replying
+写信与隐私	Composing & privacy
+写新邮件	New message
+凭据 AES-256-GCM 加密保存在本机	Credentials are stored locally with AES-256-GCM encryption
+凭据 AES-256-GCM 加密保存在本机。	Credentials are stored locally with AES-256-GCM encryption.
+出错：{}	Error: {}
+切换配色	Change color theme
+切换：按会话合并 / 平铺	Toggle: group by conversation / flat
+列表与阅读（焦点在列表时）	List & reading (when the list is focused)
+刚刚	Just now
+删除	Delete
+删除 {} 的全部 {} 封邮件？	Delete all {} messages from {}?
+删除会话	Delete conversation
+删除文件夹…	Delete folder…
+删除文件夹「{}」？	Delete folder "{}"?
+刷新列表	Refresh list
+前往下载	Go to download
+剪切	Cut
+加密备份完成并校验通过	Encrypted backup finished and verified
+加密备份：{}	Encrypted backup: {}
+加星标	Star
+加载更早的邮件	Load earlier mail
+加选 / 取消	Add / remove from selection
+包含附件	With attachments
+单位：分钟。收件箱另有 IDLE 实时推送	Unit: minutes. The inbox also gets real-time IDLE push
+单位：天	Unit: days
+单位：秒。打开邮件后停留这么久才标已读；0 = 打开即标已读	Unit: seconds. A message is marked read after being open this long; 0 = mark read on open
+单位：秒，发送后这段时间内可撤回。0 = 立即发送	Unit: seconds. You can unsend within this time. 0 = send immediately
+历史回填	History backfill
+原始排版	Original layout
+原样显示	Show original
+去除跟踪参数	Strip tracking parameters
+参会回复	Attendee reply
+反色显示	Invert colors
+发件人	From
+发件人视图	Senders
+发件人视图 / 批量清理	Senders / bulk cleanup
+发件人视图：按发件人整理 / 批量清理	Senders: organise / bulk clean by sender
+发件人身份验证未通过（SPF {} · DKIM {} · DMARC {}），这封信可能是伪造的，请谨慎对待其中的链接和附件。	Sender authentication failed (SPF {} · DKIM {} · DMARC {}). This message may be forged; be careful with its links and attachments.
+发件人：{}	From: {}
+发件箱	Outbox
+发件箱是空的	The outbox is empty
+发件箱（待发送 / 定时 / 失败）	Outbox (pending / scheduled / failed)
+发件账号	Sending account
+发信时对方看到的名字	The name recipients see
+发现新版本 {}	New version {} available
+发现新版本 {}（当前 {}）	New version {} available (current {})
+发票	Invoices
+发票汇总	Invoice summary
+发票汇总 / 按月导出	Invoice summary / export by month
+发票汇总：金额 / 开票方 / 按月导出	Invoice summary: amounts / sellers / export by month
+发送	Send
+发送中…	Sending…
+发送失败	Send failed
+取不回这封信：{}	Couldn't take the message back: {}
+取消	Cancel
+取消星标	Unstar
+另存为…	Save as…
+只删除本机的存档与凭据，服务器上的邮件不受影响。	Only the local archive and credentials are deleted; mail on the server is unaffected.
+只支持 .eml（单封）与 .mbox（归档）文件	Only .eml (single message) and .mbox (archive) files are supported
+可疑链接：显示为 {}，实际指向 {}{}	Suspicious link: shown as {}, actually points to {}{}
+右键邮件	Right-click a message
+同一会话 · 第 {} / {} 封	Same conversation · {} of {}
+同步	Sync
+同步与网络	Sync & network
+同步中 · {}	Syncing · {}
+同步此账号	Sync this account
+同步间隔	Sync interval
+命中 {}	{} matched
+命令面板	Command palette
+命令面板…	Command palette…
+回复	Reply
+回复失败：{}	Reply failed: {}
+回复模板	Reply templates
+回复至	Reply-To
+在「{}」下新建子文件夹	New subfolder under "{}"
+在写信窗口点「模板」插入。Tab 在名称和正文之间切换。	Insert from "Templates" in the compose window. Tab switches between name and body.
+在新窗口打开	Open in new window
+在本地归档新建文件夹	New folder in local archive
+在浏览器里授权，不需要授权码；下面的密码可以不填	Authorise in the browser; no app password needed. The password below can stay empty.
+在访达中显示数据目录	Show data folder in Finder
+在邮箱服务器上新建文件夹	New folder on the mail server
+地点：{}	Location: {}
+墨绿	Ink Green
+备份到这里	Back up here
+备份包含数据库快照、每封邮件的原文、发信附件，以及账号凭据的加密密钥。密码留空 = 保存成一个文件夹（不加密）；设置密码 = 保存成单个 .embak 加密文件，密钥也在密文里。	The backup contains a database snapshot, the source of every message, sent attachments and the key that encrypts account credentials. Empty password = a plain folder (unencrypted); with a password = a single encrypted .embak file, key included.
+备份失败：{}	Backup failed: {}
+备份完成并校验通过	Backup finished and verified
+备份完成，但校验发现 {} 个问题，详见 校验报告.txt	Backup finished, but verification found {} problems; see 校验报告.txt
+备份密码	Backup password
+备份密码（可选，留空 = 不加密）	Backup password (optional, empty = unencrypted)
+备注	Notes
+复制	Copy
+复制 {} 封，之前已复制 {} 封，失败 {} 封{}	Copied {}, {} copied earlier, {} failed{}
+复制主题	Copy subject
+多个地址用逗号分隔	Separate multiple addresses with commas
+夜读	Night Reading
+姓名	Name
+姓名 / 公司 / 电话 / 备注	Name / company / phone / notes
+孔雀	Peacock
+安全瘦身	Safe slimming
+安全瘦身（清理旧的本地正文缓存）	Safe slimming (clear old local body cache)
+完成	Done
+完整备份	Full backup
+完整备份（可加密）	Full backup (optionally encrypted)
+完整备份（附校验报告，可加密）	Full backup (with verification report, optionally encrypted)
+定时	Scheduled
+定时发送（到点前可在发件箱撤回）	Send later (can be withdrawn from the outbox until then)
+定时增量导出目录	Scheduled incremental export folder
+密码无法找回：忘记密码就无法恢复这份备份。	The password can't be recovered: if you forget it, this backup can't be restored.
+密送	Bcc
+导入	Import
+导入 .eml / .mbox	Import .eml / .mbox
+导入 .eml / .mbox…	Import .eml / .mbox…
+导入 vCard	Import vCard
+导入到	Import into
+导入失败：{}	Import failed: {}
+导入完成：{} 封进入「{}」	Import finished: {} messages into "{}"
+导入的邮件只存在本机，不会被当成邮箱里的邮件去同步或标记。	Imported mail lives only on this Mac and is never synced or flagged as server mail.
+导入邮件	Import mail
+导入邮件…	Import mail…
+导出 vCard	Export vCard
+导出到这里	Export here
+导出失败：{}	Export failed: {}
+导出当前列表	Export current list
+导出当前列表 {} 封	Export current list ({})
+导出所选月份 ZIP	Export selected month as ZIP
+导出选中的 {} 封	Export {} selected
+导出间隔	Export interval
+封已存档	archived
+封未读	unread
+尚未同步	Not synced yet
+展开阅读区	Show reading pane
+工具 · ⌘K 打开命令面板	Tools · ⌘K opens the command palette
+已交给「日历」	Handed to Calendar
+已从{}填好服务器地址	Server addresses filled in from {}
+已从保存的搜索中移除	Removed from saved searches
+已保存到 {}	Saved to {}
+已保存到「草稿箱」	Saved to "Drafts"
+已保存到侧栏	Saved to sidebar
+已加星标	Starred
+已发送	Sent
+已发送{}	Sent{}
+已取消星标	Unstarred
+已同步 {}	Synced {}
+已向 {} 发送退订邮件	Unsubscribe email sent to {}
+已回复	Replied
+已回复组织者：{}	Replied to organizer: {}
+已复制	Copied
+已复制主题	Subject copied
+已定时：{} 发出（在「发件箱」里可撤回）	Scheduled: will send {} (can be withdrawn from "Outbox")
+已导入 {} 个联系人（已有的只补充空白字段）	Imported {} contacts (existing ones only had blank fields filled in)
+已导出 {} 个联系人	Exported {} contacts
+已导出 {} 封到 {}{}	Exported {} messages to {}{}
+已导出 {} 张发票，合计 {}	Exported {} invoices, total {}
+已建规则：{} 的新信自动归档	Rule created: new mail from {} is archived automatically
+已开始同步	Sync started
+已开始同步 {}	Started syncing {}
+已归档	Archived
+已归档会话	Conversation archived
+已彻底删除 {} 封	Permanently deleted {}
+已拦截 {} 个追踪像素（{}），对方无法得知你是否打开了这封信。	Blocked {} tracking pixels ({}); the sender can't tell whether you opened this message.
+已按会话合并显示	Grouped by conversation
+已接入 · {}	Connected · {}
+已撤回，信已放回草稿	Withdrawn; the message is back in Drafts
+已撤销「{}」	Undid "{}"
+已改为逐封显示	Showing messages one by one
+已是最新版本 {}	You're on the latest version {}
+已暂停同步	Sync paused
+已标为垃圾邮件	Marked as junk
+已标为已读	Marked as read
+已标为未读	Marked as unread
+已添加，正在后台同步…	Added; syncing in the background…
+已清理 {} 封，释放 {}	Cleared {}, freed {}
+已移入垃圾箱 · {} 封	Moved to trash · {}
+已移动到「{}」	Moved to "{}"
+已移回收件箱	Moved back to inbox
+已移除 {}	Removed {}
+已读	Read
+已读 / 未读	Read / unread
+已退订（一键退订，对方服务器已确认）	Unsubscribed (one-click; the sender's server confirmed)
+已选 {}	{} selected
+已通过 OAuth 登录 {}，正在后台同步…	Signed in to {} via OAuth; syncing in the background…
+已重命名	Renamed
+开始复制	Start copying
+开始诊断	Start diagnosis
+开机启动	Launch at login
+开机自启	Launch at login
+归档	Archive
+归档会话	Archive conversation
+当前 {}	Current {}
+彻底删除	Delete permanently
+彻底删除 {} 封邮件？	Permanently delete {} messages?
+待发送、定时发送与发送失败的邮件	Pending, scheduled and failed messages
+待定	Tentative
+快捷键	Shortcuts
+快捷键一览	Keyboard shortcuts
+快捷键一览（也可以按 ?）	Keyboard shortcuts (or press ?)
+总是显示此发件人	Always show for this sender
+恢复	Restore
+恢复同步此文件夹	Resume syncing this folder
+恢复并重启	Restore and restart
+恢复数据已就绪，请手动重新打开应用	Restore is ready; please reopen the app manually
+恢复数据已就绪：请退出后重新启动应用（开发模式不会自动重启）	Restore is ready: quit and relaunch the app (dev mode doesn't restart automatically)
+所有邮件都会增量存档到本机，断网也能读、能搜。	All mail is archived incrementally on this Mac, readable and searchable offline.
+打开	Open
+打开{}	Open {}
+打开链接时去掉 utm 等跟踪参数	Strip utm and other tracking parameters from links
+扫描	Scan
+扫描中…	Scanning…
+扫描失败：{}	Scan failed: {}
+扫描完成	Scan finished
+扫描完成：取回 {}/{} 封疑似发票邮件的正文	Scan finished: fetched the body of {}/{} likely invoice emails
+抄送	Cc
+抄送 / 密送	Cc / Bcc
+抄送：{}	Cc: {}
+把一个文件夹里的邮件复制到另一个账号（或本地归档）的文件夹，保留已读 / 星标。原邮件不删除；中断后再点「开始」会从断点继续。	Copy mail from one folder to a folder in another account (or the local archive), keeping read / starred state. Originals aren't deleted; if interrupted, press Start again to resume.
+把时间，慢慢读回来。	Read your time back, slowly.
+折叠阅读区，列表占满	Collapse the reading pane; list takes the full width
+拒绝	Decline
+拖到侧栏文件夹	Drag to a sidebar folder
+按会话合并显示	Group by conversation
+按发件人汇总（不含已发送 / 草稿 / 垃圾箱），封数从多到少。	Summarised by sender (excluding Sent / Drafts / Junk), most messages first.
+按邮箱自动查找服务器	Find servers automatically from the address
+授权码	App password
+接受	Accept
+插入到光标处	Insert at cursor
+插入图片	Insert image
+搜索	Search
+搜索「{}」	Search "{}"
+搜索主题、联系人、正文…	Search subject, people, body…
+搜索姓名 / 邮箱 / 公司	Search name / email / company
+撤回	Unsend
+撤回发送窗口	Unsend window
+撤回编辑	Withdraw and edit
+撤销 ⌘Z	Undo ⌘Z
+撤销上一步移动 / 删除	Undo the last move / delete
+撤销移动 / 删除	Undo move / delete
+支持 .eml 单封、.mbox 归档（Thunderbird / Apple Mail / mutt 导出的都行）	Supports single .eml files and .mbox archives (from Thunderbird / Apple Mail / mutt)
+支持 Gmail（应用专用密码 + 代理）、网易 163、QQ 邮箱（授权码）与 AgentMail。	Supports Gmail (app password + proxy), NetEase 163, QQ Mail (app code) and AgentMail.
+收 {} · 发 {} · 最近 {}	In {} · Out {} · Last {}
+收件人	To
+收件人：{}	To: {}
+收发邮件时使用，留空则直连	Used for sending and receiving; leave empty to connect directly
+改为逐封显示	Show messages one by one
+数据目录：{}	Data folder: {}
+文件	File
+文件夹	Folders
+文件夹名称	Folder name
+文件夹名（不存在会自动创建）	Folder name (created if missing)
+文件夹已创建	Folder created
+文件夹已删除	Folder deleted
+文件里没有带邮箱的联系人	The file has no contacts with an email address
+新信同步进收件箱时按顺序匹配；移动 / 归档 / 删除类规则每封信只执行第一条命中的。只处理之后到达的新信。	New mail is matched in order as it syncs into the inbox; for move / archive / delete rules only the first match runs. Only mail arriving later is processed.
+新建	New
+新建子文件夹…	New subfolder…
+新建文件夹…	New folder…
+新建联系人	New contact
+新建规则	New rule
+新的文件夹名称	New folder name
+新邮件	New mail
+无法恢复：{}	Can't restore: {}
+无法预览：附件文件读取失败	Can't preview: the attachment couldn't be read
+日历邀请	Calendar invitation
+时间	Time
+时间：{}	Time: {}
+时间：{}{}	Time: {}{}
+星标	Starred
+星标 / 取消	Star / unstar
+星标 / 取消星标	Star / unstar
+星标邮件	Starred mail
+昨天	Yesterday
+显示名称	Display name
+显示图片	Show images
+暂停	Pause
+暂停同步此文件夹	Pause syncing this folder
+暮蓝	Dusk Blue
+更多操作	More actions
+更新	Update
+更新与备份	Updates & backup
+更新中…	Updating…
+更新包用 Ed25519 签名校验后才会安装；完成后应用会自动重启。邮件数据不受影响。	Updates are installed only after their Ed25519 signature is verified; the app restarts automatically. Your mail is not affected.
+更新失败：{}	Update failed: {}
+服务	Service
+服务商	Provider
+未接入邮箱	No mailbox connected
+未识别	Not recognised
+未读	Unread
+未读邮件	Unread mail
+未读邮件：0	Unread: 0
+未读邮件：{}	Unread: {}
+未选择账号	No account selected
+本地存档 {} 封 · 已缓存正文 {} 封	{} messages archived locally · {} bodies cached
+本地归档	Local archive
+本地归档 · 共 {} 封（只在本机）	Local archive · {} messages (on this Mac only)
+本地归档账号下的文件夹；同名文件夹会直接追加进去。	A folder under the local archive account; an existing folder with the same name is appended to.
+本地规则	Local rules
+松烟	Pine Smoke
+查找中…	Looking up…
+查看	View
+查看发布页	View release page
+标为垃圾邮件 / 移回收件箱	Mark as junk / move back to inbox
+标为已读	Mark as read
+标为已读 / 未读	Mark read / unread
+标为未读	Mark as unread
+校验中…	Verifying…
+校验并继续	Verify and continue
+检查更新	Check for updates
+检查更新失败：{}	Update check failed: {}
+模板	Templates
+模板名称	Template name
+模板正文（插入到写信窗口的光标处）。⌘↵ 添加	Template body (inserted at the cursor in the compose window). ⌘↵ to add
+正在下载并校验更新包…（完成后自动重启）	Downloading and verifying the update… (restarts when done)
+正在发送…	Sending…
+正在发送回复…	Sending reply…
+正在取回这封信…	Taking the message back…
+正在同步「{}」	Syncing "{}"
+正在同步全部账号…	Syncing all accounts…
+正在同步此文件夹…	Syncing this folder…
+正在同步：{}	Syncing: {}
+正在备份…	Backing up…
+正在备份并加密…	Backing up and encrypting…
+正在复制 {} / {}…	Copying {} / {}…
+正在导出…	Exporting…
+正在校验备份…	Verifying backup…
+正在解密并校验备份…（大备份需要一会儿）	Decrypting and verifying backup… (large backups take a while)
+正在读取…	Reading…
+正在读取文件夹…	Reading folders…
+正在退订…	Unsubscribing…
+正在逐步检查…	Checking step by step…
+正文还没下载到本地，先在主窗口打开一次再试	The body isn't downloaded yet; open it once in the main window and try again
+正文预取	Body prefetch
+每个文件夹先拉最近多少封	How many recent messages to fetch per folder first
+每个文件夹缓存最新多少封的正文，用于全文搜索和离线阅读	How many latest bodies to cache per folder, for full-text search and offline reading
+每天最多一次请求 GitHub Releases，不带设备标识	At most one request to GitHub Releases per day, with no device identifier
+没找到自动配置：{}，请手动填写	No automatic configuration found: {}; please fill in manually
+没拦住：{}	Couldn't stop it: {}
+没有匹配的联系人。往来过的人会自动出现在这里，也可以点「新建」或导入 vCard。	No matching contacts. People you correspond with appear here automatically; you can also click "New" or import a vCard.
+没有可以清理的旧正文缓存	No old body cache to clear
+没有可用的发件账号	No sending account available
+活动已取消	Event cancelled
+浅色	Light
+浅色时	In light mode
+测试中…	Testing…
+测试连接	Test connection
+深林	Deep Forest
+深色	Dark
+深色主题下反色显示 HTML 邮件	Invert HTML mail in dark themes
+深色时	In dark mode
+深色模式要带反色样式	Dark mode needs the inverted style
+添加到日历	Add to Calendar
+添加模板	Add template
+添加规则	Add rule
+添加账号	Add account
+添加邮箱	Add mailbox
+添加邮箱账号	Add mailbox account
+添加附件	Attach files
+清理	Clean up
+清理 {} 封一年前邮件的本地正文缓存？	Clear the local body cache of {} messages older than a year?
+清除手动信息	Clear manual info
+清除搜索	Clear search
+火车	Train
+点击选择，或把文件拖到这里	Click to choose, or drop a file here
+用 Google 账号登录（OAuth）	Sign in with Google (OAuth)
+用 Microsoft 账号登录（推荐）	Sign in with Microsoft (recommended)
+用备份替换当前数据？（{} 个账号、{} 封邮件、{} 封有正文）	Replace current data with this backup? ({} accounts, {} messages, {} with bodies)
+电话	Phone
+留空 = 关闭	Empty = off
+留空使用内置	Empty = use built-in
+留空使用内置应用；组织要求自有注册时才填	Empty = use the built-in app; fill in only if your organisation requires its own registration
+留空则不导出	Empty = no export
+留空表示不修改	Empty = keep unchanged
+瘦身失败：{}	Slimming failed: {}
+登录 macOS 时自动在后台启动，只显示菜单栏图标	Starts in the background at login, showing only the menu bar icon
+白底邮件在深色主题里变成深底浅字，图片保持原样；阅读区工具栏可随时切回原样	White mail becomes light-on-dark in dark themes and images are left as they are; switch back any time from the reading toolbar
+确定	OK
+移动	Move
+移动到…	Move to…
+移动到文件夹	Move to folder
+移动邮件	Move mail
+移除	Remove
+移除图片	Remove image
+移除账号 {}？	Remove account {}?
+稍后	Later
+稍后处理	Snooze
+稍后处理…	Snooze…
+稍后处理，到时重新出现在收件箱	Snooze; reappears in the inbox later
+稍后处理：{} 重新出现在收件箱	Snoozed: reappears in the inbox at {}
+空闲时按每批 500 封继续回填更早的邮件（完整归档）	Backfill older mail in batches of 500 while idle (full archive)
+立即发送	Send now
+立即同步	Sync now
+立即同步全部账号	Sync all accounts now
+立即同步此文件夹	Sync this folder now
+立即更新	Update now
+等待浏览器授权…	Waiting for browser authorisation…
+等待重试 · {}	Waiting to retry · {}
+签名	Signature
+粘贴	Paste
+紫檀	Rosewood
+约释放 {}。只清理服务器上仍有副本的邮件，本地归档（导入的邮件）不受影响；主题、发件人与全文搜索照常可用，打开时自动从服务器取回。	About {} will be freed. Only mail that still has a copy on the server is cleared; the local archive (imported mail) is untouched. Subjects, senders and full-text search keep working, and bodies are re-fetched when opened.
+纯文本	Plain text
+组织者：{}	Organizer: {}
+经 {}{}	via {}{}
+统一收件箱	Unified inbox
+编辑	Edit
+编辑 · {}	Edit · {}
+编辑联系人	Edit contact
+网络	Network
+联系人	Contacts
+联系人：往来统计 / 备注 / vCard 导入导出	Contacts: correspondence stats / notes / vCard import & export
+自动归档	Auto-archive
+自动检查更新	Check for updates automatically
+自动配置	Auto configuration
+致 {}	To {}
+航班	Flight
+范围选择	Range select
+草稿	Drafts
+草稿 · {}	Drafts · {}
+草稿与已添加的附件都会删除。	The draft and attached files will be deleted.
+草稿保存失败：{}	Couldn't save draft: {}
+草稿已自动保存 {}	Draft autosaved {}
+藏蓝	Navy
+要匹配的文字，例如 newsletter@ 或 发票	Text to match, e.g. newsletter@ or invoice
+见字如面……（可直接粘贴 / 拖入图片，或用下方的按钮插入链接、表情、图片）	Write here… (paste or drop images, or use the buttons below to insert links, emoji and images)
+视图	View
+解析中 {}% · 已导入 {} 封{}	Parsing {}% · {} imported{}
+计划 {} 发出	Scheduled to send {}
+订单 {}	Order {}
+设置	Settings
+设置已保存	Settings saved
+设置（同步、撤回发送、更新、OAuth、定时导出）	Settings (sync, unsend, updates, OAuth, scheduled export)
+请先填写收件人	Please enter a recipient first
+请填写授权码 / 密码	Please enter the app password / password
+请填写模板名称和正文	Please enter a template name and body
+读取列表失败：{}	Couldn't load the list: {}
+读取失败：{}	Read failed: {}
+谁在追踪你	Who is tracking you
+账  号	Accounts
+账号与设置	Accounts & settings
+账号与设置…	Accounts & settings…
+账号已保存，可以收信；但发信（SMTP）测试没通过，暂时发不出邮件：{}	Account saved and can receive mail, but the SMTP test failed so sending doesn't work yet: {}
+账号已更新	Account updated
+账号设置…	Account settings…
+账号间搬家	Move between accounts
+账号间搬家（复制文件夹）	Move between accounts (copy a folder)
+赭石	Ochre
+跟随系统	Follow system
+跟随系统 · Auto	Follow system · Auto
+跳过 {} 封重复邮件（Message-ID 已存在）	Skipped {} duplicates (Message-ID already present)
+转发	Forward
+输入创建备份时设置的密码	Enter the password set when the backup was made
+输入命令或视图名称…	Type a command or view name…
+输入框里不会触发单键快捷键	Single-key shortcuts don't fire inside text fields
+过去 30 天，EasyMail 在已缓存的邮件里拦截了 {} 个追踪像素（来自 {} 位发件人）。远程图片默认不加载，所以对方无法知道你是否、何时打开了邮件。	In the past 30 days EasyMail blocked {} tracking pixels in cached mail (from {} senders). Remote images are not loaded by default, so senders can't tell whether or when you opened a message.
+返回列表	Back to list
+还没有接入邮箱账号	No mailbox accounts yet
+还没有模板：⌘K →「回复模板」添加	No templates yet: ⌘K → "Reply templates" to add one
+还没有草稿。	No drafts yet.
+还没有识别到发票。点下面的「扫描」：会识别已缓存邮件里的 PDF 发票，并取回主题像发票的邮件。	No invoices found yet. Click "Scan" below: it detects PDF invoices in cached mail and fetches messages whose subject looks like an invoice.
+还没有账号。先添加一个 Gmail、163 或 QQ 邮箱。	No accounts yet. Add a Gmail, 163 or QQ mailbox first.
+这个发件人只支持网页退订，已在浏览器中打开	This sender only supports web unsubscribe; opened in your browser
+这个版本不能自动更新（没有签名文件，或不是从 .app 启动的），请前往下载页手动安装。	This build can't update automatically (no signature file, or not launched from the .app); please install manually from the download page.
+这个面板	This panel
+这些邮件已在垃圾箱 / 垃圾邮件里，或来自「本地归档」、所在邮箱没有垃圾箱，删除后无法恢复，也不能撤销。	These messages are already in the trash / junk, come from the local archive, or their mailbox has no trash. Deleting them can't be undone.
+这封信没有主题，仍然发送？	This message has no subject. Send anyway?
+这封信还是空的，没有可保存的内容	This message is empty; nothing to save
+连接诊断	Connection diagnostics
+退出	Quit
+退出{}	Quit {}
+退订	Unsubscribe
+退订失败：{}	Unsubscribe failed: {}
+选中的邮件来自多个账号，不能一起移动。	The selected messages belong to several accounts and can't be moved together.
+选择一封邮件，开始阅读。	Select a message to start reading.
+选择位置并加密备份	Choose location and back up (encrypted)
+选择位置并备份	Choose location and back up
+选择备份	Choose backup
+选择文件	Choose file
+通过代理连接（Gmail 在国内必须勾选；代理地址在「同步设置」里改）	Connect through the proxy (needed for Gmail in mainland China; change the address under "Sync settings")
+邮  件	Mail
+邮件不存在	Message not found
+邮件不存在（可能已被删除）	Message not found (it may have been deleted)
+邮件操作	Message actions
+邮箱地址	Email address
+邮箱账号	Mailbox accounts
+配色主题 · {} 套	Color themes · {}
+配色：{}	Theme: {}
+酒店	Hotel
+酒红	Burgundy
+重命名…	Rename…
+重试	Retry
+阅读	Reading
+附  件 · {}	Attachments · {}
+附件	Attachments
+附件不存在	Attachment not found
+附件：单个不超过 {} MB，支持任意格式；可点「添加附件」或拖入窗口。部分邮箱会拦截 .exe、.bat 等可执行文件，整封邮件通常有总大小上限（多数 25～50 MB）。	Attachments: up to {} MB each, any format; use "Attach files" or drop them on the window. Some mailboxes block executables such as .exe and .bat, and a whole message usually has a total size limit (mostly 25–50 MB).
+附带原邮件的附件	Include the original attachments
+附校验报告，可选密码加密	With verification report, optional password encryption
+隐私报告	Privacy report
+隐私报告：谁在追踪你	Privacy report: who is tracking you
+隐藏{}	Hide {}
+隐藏窗口（后台继续收信）	Hide window (keep receiving mail)
+预览失败：{}	Preview failed: {}
+首次同步	First sync
+验证并添加…	Verify and add…
+验证码	Verification code
+验证码 {}	Verification code {}
+验证码 {}（{}）	Verification code {} ({})
+验证码已复制	Verification code copied
+鼠标	Mouse
+（{} 封正文取不到，已跳过）	({} bodies couldn't be fetched and were skipped)
+（{} 张金额未识别）	({} amounts not recognised)
+（无主题）	(no subject)
+（未填收件人）	(no recipient)
+（没有可用的发件账号）	(no sending account available)
+（这封信没有可显示的正文）	(this message has no displayable body)
+（重复活动）	(recurring event)
+收件箱	Inbox
+草稿箱	Drafts
+所有邮件	All mail
+重要	Important
+垃圾邮件	Junk
+已删除	Trash
+邮件	Mail
+{} · {} 封（取自本地已同步的文件夹）	{} · {} messages (from locally synced folders)
+{} · {} 张 · {}	{} · {} invoices · {}
+{} · 服务器 {} 封 · 本地 {} 封	{} · {} on server · {} local
+{} 个	{}
+{} 位 · 往来统计来自本机邮件	{} contacts · stats come from mail on this Mac
+{} 位发件人	{} senders
+{} 分钟前	{} min ago
+{} 封	{}
+{} 封 · {} 个像素	{} messages · {} pixels
+{} 封 · 未读 {} · {} · 最近 {}	{} messages · {} unread · {} · last {}
+{} 封结果 · {}	{} results · {}
+{} 封草稿（保存在本机）	{} drafts (stored on this Mac)
+{} 封解析失败{}	{} failed to parse{}
+{} 封邮件	{} messages
+{} 封邮件{}	{} messages{}
+{} 封邮件将在 {} 回到收件箱	{} messages will return to the inbox at {}
+{} 小时前	{} h ago
+{} 张 · 合计 {}{}	{} invoices · total {}{}
+{} 收到 {} 封新邮件	{} received {} new messages
+{} 条	{}
+{} 秒后发送	Sending in {} s
+{}包含「{}」→ {}{}	{} contains "{}" → {}{}
+{}（命中超过 {} 封，只导出了最早的 {} 封，请缩小范围分批导出）	{} (more than {} matched; only the earliest {} were exported — narrow the range and export in batches)
+{}：{} 封、{}（{}）	{}: {} messages, {} ({})
+· {} 人受邀，{} 人已接受	· {} invited, {} accepted
+ · {} 人受邀，{} 人已接受	 · {} invited, {} accepted

@@ -39,7 +39,7 @@ impl MailApp {
                             .text_size(px(21.))
                             .font_weight(FontWeight::BOLD)
                             .text_color(t.ink)
-                            .child(self.title()),
+                            .child(crate::i18n::tr(&self.title()).into_owned()),
                     )
                     .when(folder.as_ref().is_some_and(|f| f.unseen > 0 && f.sync_enabled), |d| {
                         let fid = folder.as_ref().map(|f| f.id).unwrap_or(0);
@@ -78,7 +78,7 @@ impl MailApp {
                             .on_click(cx.listener(|a, ev: &ClickEvent, _, cx| a.toggle_pop(Pop::Tools, ev.position(), cx))),
                     ),
             )
-            .child(div().text_size(px(11.5)).text_color(t.muted).mt(px(3.)).child(self.subtitle()))
+            .child(div().text_size(px(11.5)).text_color(t.muted).mt(px(3.)).child(crate::i18n::tr(&self.subtitle()).into_owned()))
             .when(self.q.is_empty() && !drafts && n_checked == 0, |d| {
                 let mut row = div().flex().gap(px(6.)).mt(px(10.));
                 for (f, label) in [(Filter::All, "全部"), (Filter::Unread, "未读"), (Filter::Starred, "星标"), (Filter::Attachments, "附件")] {
@@ -394,7 +394,14 @@ impl MailApp {
                                 .text_size(px(10.5))
                                 .text_color(t.muted)
                                 .child(dot(t.named(&m.account_color), 6.))
-                                .child(div().max_w(px(110.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(m.folder_name.clone())),
+                                .child(
+                                    div()
+                                        .max_w(px(110.))
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .child(crate::i18n::tr(&m.folder_name).into_owned()),
+                                ),
                         )
                     })
                     .when(m.thread_count > 1, |d| d.child(badge(t, format!("{} 封", m.thread_count), false)))

@@ -66,11 +66,18 @@ impl Element for &'static str {
     }
 }
 
+/// [easymail patch] 界面文字翻译钩子：应用启动时设置，返回 Some 就用译文替换要画的文字（见 src/i18n.rs）
+pub static TEXT_HOOK: std::sync::OnceLock<fn(&str) -> Option<String>> = std::sync::OnceLock::new();
+
+fn hooked(s: &str) -> Option<SharedString> {
+    TEXT_HOOK.get().and_then(|f| f(s)).map(SharedString::from)
+}
+
 impl IntoElement for &'static str {
-    type Element = Self;
+    type Element = SharedString;
 
     fn into_element(self) -> Self::Element {
-        self
+        hooked(self).unwrap_or_else(|| self.into())
     }
 }
 
@@ -78,7 +85,7 @@ impl IntoElement for String {
     type Element = SharedString;
 
     fn into_element(self) -> Self::Element {
-        self.into()
+        hooked(&self).unwrap_or_else(|| self.into())
     }
 }
 
@@ -136,7 +143,7 @@ impl IntoElement for SharedString {
     type Element = Self;
 
     fn into_element(self) -> Self::Element {
-        self
+        hooked(&self).unwrap_or(self)
     }
 }
 
