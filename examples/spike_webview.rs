@@ -31,7 +31,7 @@ impl Render for Demo {
                         canvas(
                             |b, _, _| b,
                             move |b, _, window, _| {
-                                let doc = webview::mail_document(HTML, false);
+                                let doc = webview::mail_document(HTML, false, false);
                                 webview::show(window, b, 1, &doc);
                                 webview::set_frozen(frozen);
                             },

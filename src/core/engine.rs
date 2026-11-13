@@ -626,6 +626,7 @@ impl Engine {
         c.select("INBOX").await?;
         *established = true;
         let idle = c.caps.idle;
+        let notify = idle && c.enable_notify().await;
         self.set_watch(id, if idle { WatchMode::Idle } else { WatchMode::Poll });
         // IDLE：每 5 分钟重进一次（代理 / NAT 会悄悄掐掉长时间无流量的连接）；不支持 IDLE：45 秒一次 NOOP
         let period = if idle { Duration::from_secs(300) } else { Duration::from_secs(45) };
@@ -647,7 +648,8 @@ impl Engine {
             if changed {
                 tokio::time::sleep(Duration::from_millis(1500)).await;
                 let inbox: Option<i64> = self.store().r().query_row("SELECT id FROM folders WHERE account_id = ? AND role = 'inbox'", [id], |r| r.get(0)).ok();
-                let n = self.sync_and_wait(id, inbox, false).await.unwrap_or(0);
+                // NOTIFY 已订阅：动静可能来自任何文件夹，同步整个账号；否则只同步收件箱
+                let n = self.sync_and_wait(id, if notify { None } else { inbox }, false).await.unwrap_or(0);
                 if n > 0 {
                     let (from, subject) = inbox
                         .and_then(|f| {

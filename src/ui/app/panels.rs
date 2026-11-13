@@ -3,7 +3,7 @@
 //! 都是「打开时读一次数据、操作后重读」的简单面板，用一个 [`Panel`] 枚举承载状态，在模态层里渲染。
 
 use super::*;
-use crate::core::{archive, backup_pack, outbox, queries::Sender, queries::TrackerRow, rules, tools, updater};
+use crate::core::{archive, backup_pack, contacts, invoice, outbox, queries::Sender, queries::TrackerRow, rules, tools, updater};
 use crate::ui::text_area::{TextArea, TextAreaEvent};
 use std::path::PathBuf;
 
@@ -41,6 +41,26 @@ pub enum Panel {
     Update {
         rel: tools::Release,
         state: UpdateState,
+    },
+    /// 快捷键一览（按 ? 打开）
+    Shortcuts,
+    /// 联系人列表（q = 搜索框）
+    Contacts {
+        rows: Vec<contacts::ContactRow>,
+        q: Entity<LineInput>,
+    },
+    /// 编辑 / 新建联系人。`fields` 依次为：地址、姓名、公司、电话、备注
+    ContactEdit {
+        is_new: bool,
+        starred: bool,
+        fields: Vec<Entity<LineInput>>,
+    },
+    /// 发票汇总：列表 / 月份筛选 / 扫描 / 按月导出
+    Invoices {
+        rows: Vec<invoice::InvoiceRow>,
+        months: Vec<(String, i64, i64)>,
+        month: Option<String>,
+        scanning: bool,
     },
     /// 完整备份：可选密码（留空 = 不加密）
     Backup {
@@ -107,6 +127,9 @@ pub enum Cmd {
     Prefs,
     Backup,
     Restore,
+    Invoices,
+    Shortcuts,
+    Contacts,
     Slim,
     CheckUpdate,
     Undo,
@@ -130,6 +153,9 @@ pub fn commands() -> Vec<(Cmd, &'static str, &'static str)> {
         (Cmd::Migrate, "账号间搬家（复制文件夹）", "migrate copy banjia"),
         (Cmd::Diagnose, "连接诊断", "diagnose zhenduan"),
         (Cmd::Backup, "完整备份（附校验报告，可加密）", "backup beifen"),
+        (Cmd::Contacts, "联系人：往来统计 / 备注 / vCard 导入导出", "contacts lianxiren tongxunlu"),
+        (Cmd::Shortcuts, "快捷键一览（也可以按 ?）", "shortcuts keys kuaijiejian help"),
+        (Cmd::Invoices, "发票汇总：金额 / 开票方 / 按月导出", "invoice fapiao fp"),
         (Cmd::Restore, "从备份恢复…（目录或 .embak 加密备份）", "restore huifu beifen"),
         (Cmd::Slim, "安全瘦身（清理旧的本地正文缓存）", "slim shoushen"),
         (Cmd::CheckUpdate, "检查更新", "update gengxin"),
@@ -182,6 +208,9 @@ impl MailApp {
             Cmd::Prefs => self.open_accounts(Tab::Settings, false, window, cx),
             Cmd::Backup => self.open_backup(window, cx),
             Cmd::Restore => self.restore(window, cx),
+            Cmd::Invoices => self.open_invoices(None, cx),
+            Cmd::Shortcuts => self.open_panel_shortcuts(cx),
+            Cmd::Contacts => self.open_contacts("", window, cx),
             Cmd::Slim => self.slim(window, cx),
             Cmd::CheckUpdate => self.check_update(true, cx),
             Cmd::Undo => self.undo(cx),
@@ -314,6 +343,191 @@ impl MailApp {
         v.push(Template { name: n.trim().into(), body: bd });
         save_templates(&self.store, &v);
         self.open_templates(window, cx);
+    }
+
+    /// 联系人列表。`filter` 是搜索框的初始内容
+    pub fn open_contacts(&mut self, filter: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let q = self.line("搜索姓名 / 邮箱 / 公司", filter, cx);
+        let sub = cx.subscribe_in(&q, window, |this: &mut Self, input, ev: &InputEvent, window, cx| match ev {
+            InputEvent::Changed => {
+                let text = input.read(cx).text().to_string();
+                if let Some(Modal::Panel(Panel::Contacts { rows, .. })) = &mut this.modal {
+                    *rows = contacts::list(&this.store, &text, 200).unwrap_or_default();
+                    cx.notify();
+                }
+            }
+            InputEvent::Cancel => this.close_modal(window, cx),
+            _ => {}
+        });
+        let rows = contacts::list(&self.store, filter, 200).unwrap_or_default();
+        let h = q.focus_handle(cx);
+        self.open_panel(Panel::Contacts { rows, q }, cx);
+        self.modal_sub = Some(sub);
+        window.focus(&h);
+    }
+
+    /// 编辑（`row = Some`）或新建联系人；Tab / Shift-Tab 在各栏之间切换
+    pub fn open_contact_edit(&mut self, row: Option<contacts::ContactRow>, window: &mut Window, cx: &mut Context<Self>) {
+        let is_new = row.is_none();
+        let r = row.unwrap_or_default();
+        let fields: Vec<Entity<LineInput>> = [("邮箱地址", &r.address), ("姓名", &r.name), ("公司", &r.org), ("电话", &r.phone), ("备注", &r.note)]
+            .into_iter()
+            .map(|(ph, v)| self.line(ph, v, cx))
+            .collect();
+        let handles: Vec<FocusHandle> = fields.iter().map(|f| f.focus_handle(cx)).collect();
+        let mut subs: Vec<Subscription> = Vec::new();
+        for (i, f) in fields.iter().enumerate() {
+            let handles = handles.clone();
+            subs.push(cx.subscribe_in(f, window, move |this: &mut Self, _, ev: &InputEvent, window, cx| match ev {
+                InputEvent::Tab { back } => {
+                    let n = handles.len();
+                    window.focus(&handles[if *back { (i + n - 1) % n } else { (i + 1) % n }]);
+                }
+                InputEvent::Submit { .. } if i + 1 < handles.len() => window.focus(&handles[i + 1]),
+                InputEvent::Submit { .. } => this.save_contact(window, cx),
+                InputEvent::Cancel => this.open_contacts("", window, cx),
+                _ => {}
+            }));
+        }
+        self.open_panel(Panel::ContactEdit { is_new, starred: r.starred, fields }, cx);
+        self.modal_sub = subs.into_iter().reduce(Subscription::join);
+        window.focus(&handles[if is_new { 0 } else { 1 }]);
+    }
+
+    pub fn save_contact(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Modal::Panel(Panel::ContactEdit { starred, fields, .. })) = &self.modal else { return };
+        let t = |i: usize| fields[i].read(cx).text().to_string();
+        let row = contacts::ContactRow { address: t(0), name: t(1), org: t(2), phone: t(3), note: t(4), starred: *starred, ..Default::default() };
+        match contacts::save(&self.store, &row) {
+            Ok(()) => self.open_contacts("", window, cx),
+            Err(e) => self.toast(format!("{e:#}"), true, cx),
+        }
+    }
+
+    fn import_vcard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("导入 vCard".into()),
+            allowed_extensions: None,
+        });
+        cx.spawn_in(window, async move |this: WeakEntity<Self>, cx| {
+            let Some(path) = rx.await.ok().and_then(|r| r.ok()).flatten().and_then(|v| v.into_iter().next()) else { return };
+            this.update_in(cx, |a, window, cx| match std::fs::read(&path) {
+                Ok(raw) => {
+                    let rows = contacts::from_vcard(&String::from_utf8_lossy(&raw));
+                    if rows.is_empty() {
+                        a.toast("文件里没有带邮箱的联系人", true, cx);
+                        return;
+                    }
+                    match contacts::import(&a.store, &rows) {
+                        Ok(n) => {
+                            a.open_contacts("", window, cx);
+                            a.toast(format!("已导入 {n} 个联系人（已有的只补充空白字段）"), false, cx);
+                        }
+                        Err(e) => a.toast(format!("导入失败：{e:#}"), true, cx),
+                    }
+                }
+                Err(e) => a.toast(format!("读取失败：{e}"), true, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn export_vcard(&mut self, cx: &mut Context<Self>) {
+        let Some(Modal::Panel(Panel::Contacts { rows, .. })) = &self.modal else { return };
+        let vcf = contacts::to_vcard(rows);
+        let n = rows.len();
+        let dl = dirs::download_dir().unwrap_or_else(|| PathBuf::from("."));
+        let rx = cx.prompt_for_new_path(&dl, Some("EasyMail-联系人.vcf"));
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let Some(path) = rx.await.ok().and_then(|r| r.ok()).flatten() else { return };
+            this.update(cx, |a, cx| match std::fs::write(&path, vcf) {
+                Ok(()) => {
+                    a.toast(format!("已导出 {n} 个联系人"), false, cx);
+                    cx.reveal_path(&path);
+                }
+                Err(e) => a.toast(format!("导出失败：{e}"), true, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub fn open_panel_shortcuts(&mut self, cx: &mut Context<Self>) {
+        self.open_panel(Panel::Shortcuts, cx);
+    }
+
+    pub fn open_invoices(&mut self, month: Option<String>, cx: &mut Context<Self>) {
+        let rows = invoice::list(&self.store, month.as_deref()).unwrap_or_default();
+        let months = invoice::months(&self.store).unwrap_or_default();
+        self.open_panel(Panel::Invoices { rows, months, month, scanning: false }, cx);
+    }
+
+    /// 扫描：先补扫已缓存的邮件，再把主题像发票、正文还没下载的邮件取回来识别（最多 200 封）
+    fn scan_invoices(&mut self, cx: &mut Context<Self>) {
+        let Some(Modal::Panel(Panel::Invoices { scanning, .. })) = &mut self.modal else { return };
+        if *scanning {
+            return;
+        }
+        *scanning = true;
+        cx.notify();
+        let (store, eng) = (self.store.clone(), self.eng.clone());
+        self.run(
+            async move {
+                while invoice::scan_backlog(&store, 100)? > 0 {}
+                let ids = invoice::remote_candidates(&store, 200)?;
+                let mut fetched = 0;
+                for id in &ids {
+                    if eng.ensure_body(*id).await.is_ok() {
+                        fetched += 1;
+                    }
+                }
+                while invoice::scan_backlog(&store, 100)? > 0 {}
+                Ok((ids.len(), fetched))
+            },
+            cx,
+            |a, r, cx| {
+                let month = match &a.modal {
+                    Some(Modal::Panel(Panel::Invoices { month, .. })) => month.clone(),
+                    _ => return,
+                };
+                a.open_invoices(month, cx);
+                match r {
+                    Ok((0, _)) => a.toast("扫描完成", false, cx),
+                    Ok((n, f)) => a.toast(format!("扫描完成：取回 {f}/{n} 封疑似发票邮件的正文"), false, cx),
+                    Err(e) => a.toast(format!("扫描失败：{e:#}"), true, cx),
+                }
+            },
+        );
+    }
+
+    fn export_invoices(&mut self, cx: &mut Context<Self>) {
+        let Some(Modal::Panel(Panel::Invoices { month: Some(month), .. })) = &self.modal else { return };
+        let month = month.clone();
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("导出到这里".into()),
+            allowed_extensions: None,
+        });
+        let store = self.store.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let Some(dir) = rx.await.ok().and_then(|r| r.ok()).flatten().and_then(|v| v.into_iter().next()) else { return };
+            let r = cx.background_spawn(async move { invoice::export_month(&store, &month, &dir) }).await;
+            this.update(cx, |a, cx| match r {
+                Ok(rep) => {
+                    a.toast(format!("已导出 {} 张发票，合计 {}", rep.count, invoice::fmt_amount(rep.total_cents)), false, cx);
+                    cx.reveal_path(&rep.zip);
+                }
+                Err(e) => a.toast(format!("导出失败：{e:#}"), true, cx),
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// 完整备份面板：可选设置密码；留空 = 不加密（备份目录），设了密码 = 单个 .embak 加密文件
@@ -1147,6 +1361,308 @@ impl MailApp {
                         button("up-dl", t, Kind::Primary, None, "前往下载", false).on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url)))
                     });
                 modal_shell(t, 560., format!("发现新版本 {}", rel.version), format!("当前 {}", crate::core::config::VERSION), close)
+                    .child(b)
+                    .child(footer)
+                    .into_any_element()
+            }
+            Panel::Invoices { rows, months, month, scanning } => {
+                let scanning = *scanning;
+                let total: i64 = rows.iter().filter_map(|r| r.amount_cents).sum();
+                let unknown = rows.iter().filter(|r| r.amount_cents.is_none()).count();
+                let mut chips = div().flex().flex_wrap().gap(px(6.));
+                let chip = |id: SharedString, label: String, on: bool| {
+                    div()
+                        .id(id)
+                        .px(px(10.))
+                        .py(px(4.))
+                        .rounded(px(14.))
+                        .border_1()
+                        .border_color(if on { t.accent } else { t.border })
+                        .bg(if on { t.accent_soft } else { t.paper })
+                        .text_size(px(12.))
+                        .cursor_pointer()
+                        .child(label)
+                };
+                chips = chips.child(chip("inv-all".into(), "全部".into(), month.is_none()).on_click(cx.listener(|a, _, _, cx| a.open_invoices(None, cx))));
+                for (i, (m, n, sum)) in months.iter().enumerate() {
+                    let target = m.clone();
+                    chips = chips.child(
+                        chip(
+                            SharedString::from(format!("inv-m-{i}")),
+                            format!("{m} · {n} 张 · {}", invoice::fmt_amount(*sum)),
+                            month.as_deref() == Some(m.as_str()),
+                        )
+                        .on_click(cx.listener(move |a, _, _, cx| a.open_invoices(Some(target.clone()), cx))),
+                    );
+                }
+                let mut b = body.child(chips);
+                if rows.is_empty() {
+                    b = b.child(
+                        div()
+                            .py(px(24.))
+                            .text_center()
+                            .text_color(t.muted)
+                            .child("还没有识别到发票。点下面的「扫描」：会识别已缓存邮件里的 PDF 发票，并取回主题像发票的邮件。"),
+                    );
+                }
+                for (i, r) in rows.iter().enumerate().take(300) {
+                    let id = r.message_id;
+                    b = b.child(
+                        row(SharedString::from(format!("inv-{i}")))
+                            .child(div().w(px(84.)).flex_none().text_color(t.muted).child(r.date.clone()))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().child(if r.seller.is_empty() {
+                                        r.subject.clone()
+                                    } else {
+                                        r.seller.clone()
+                                    }))
+                                    .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(11.)).text_color(t.muted).child(format!(
+                                        "{} · {}{}",
+                                        r.kind,
+                                        r.filename,
+                                        if r.number.is_empty() { String::new() } else { format!(" · {}", r.number) }
+                                    ))),
+                            )
+                            .child(
+                                div()
+                                    .w(px(96.))
+                                    .flex_none()
+                                    .text_right()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(r.amount_cents.map(invoice::fmt_amount).unwrap_or_else(|| "未识别".into())),
+                            )
+                            .on_click(cx.listener(move |a, _, w, cx| {
+                                a.close_modal(w, cx);
+                                a.open_message(id, cx);
+                            })),
+                    );
+                }
+                let sub = format!(
+                    "{} 张 · 合计 {}{}",
+                    rows.len(),
+                    invoice::fmt_amount(total),
+                    if unknown > 0 { format!("（{unknown} 张金额未识别）") } else { String::new() }
+                );
+                let footer = modal_footer(t)
+                    .child(div().flex_1().text_size(px(11.5)).text_color(t.muted).child("PDF 文字用本地规则解析，扫描件识别不了；金额请以原件为准"))
+                    .child(
+                        disabled(button("inv-scan", t, Kind::Secondary, Some("refresh"), if scanning { "扫描中…" } else { "扫描" }, false), scanning)
+                            .on_click(cx.listener(|a, _, _, cx| a.scan_invoices(cx))),
+                    )
+                    .child(
+                        disabled(button("inv-export", t, Kind::Primary, Some("download"), "导出所选月份 ZIP", false), month.is_none() || rows.is_empty())
+                            .on_click(cx.listener(|a, _, _, cx| a.export_invoices(cx))),
+                    );
+                modal_shell(t, 760., "发票汇总", sub, close).child(b).child(footer).into_any_element()
+            }
+            Panel::Shortcuts => {
+                let groups: [(&str, &[(&str, &str)]); 4] = [
+                    (
+                        "列表与阅读（焦点在列表时）",
+                        &[("j / ↓", "下一封"), ("k / ↑", "上一封"), ("[ / ]", "会话内上一封 / 下一封"), ("/", "搜索"), ("?", "这个面板")],
+                    ),
+                    (
+                        "邮件操作",
+                        &[
+                            ("r", "回复"),
+                            ("a", "全部回复"),
+                            ("f", "转发"),
+                            ("s", "星标 / 取消"),
+                            ("u", "已读 / 未读"),
+                            ("e", "归档"),
+                            ("# / Delete", "删除"),
+                            ("⌘Z", "撤销移动 / 删除"),
+                        ],
+                    ),
+                    (
+                        "全局",
+                        &[
+                            ("⌘N / c", "写新邮件"),
+                            ("⌘K", "命令面板"),
+                            ("⌘F", "搜索"),
+                            ("⌘R", "立即同步"),
+                            ("⌘,", "账号与设置"),
+                            ("⌘⇧D", "切换配色"),
+                            ("⌘W", "隐藏窗口（后台继续收信）"),
+                            ("⌘Q", "退出"),
+                        ],
+                    ),
+                    ("鼠标", &[("右键邮件", "上下文菜单"), ("Shift + 点击", "范围选择"), ("⌘ + 点击", "加选 / 取消"), ("拖到侧栏文件夹", "移动邮件")]),
+                ];
+                let mut b = body;
+                for (title, items) in groups {
+                    b = b.child(div().mt(px(6.)).text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD).text_color(t.muted).child(title));
+                    for (k, v) in items {
+                        b = b.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(10.))
+                                .py(px(2.))
+                                .child(div().w(px(150.)).flex_none().font_family(MONO).text_size(px(12.)).text_color(t.accent_deep).child(k.to_string()))
+                                .child(div().text_color(t.ink_2).child(v.to_string())),
+                        );
+                    }
+                }
+                modal_shell(t, 520., "快捷键", "输入框里不会触发单键快捷键", close).child(b).into_any_element()
+            }
+            Panel::Contacts { rows, q } => {
+                let focused = q.read(cx).is_focused(window);
+                let mut b = body.child(field_box(t, focused).child(div().flex_1().child(q.clone())));
+                if rows.is_empty() {
+                    b = b.child(
+                        div()
+                            .py(px(24.))
+                            .text_center()
+                            .text_color(t.muted)
+                            .child("没有匹配的联系人。往来过的人会自动出现在这里，也可以点「新建」或导入 vCard。"),
+                    );
+                }
+                for (i, c) in rows.iter().enumerate().take(200) {
+                    let (addr, addr2, addr3, addr4) = (c.address.clone(), c.address.clone(), c.address.clone(), c.address.clone());
+                    let row_data = c.clone();
+                    let initial: String = c.display().chars().next().map(|ch| ch.to_uppercase().collect()).unwrap_or_default();
+                    let mut stats = Vec::new();
+                    if !c.org.is_empty() {
+                        stats.push(c.org.clone());
+                    }
+                    if c.received + c.sent > 0 {
+                        stats.push(format!("收 {} · 发 {} · 最近 {}", c.received, c.sent, fmt_short(c.last)));
+                    }
+                    b = b.child(
+                        row(SharedString::from(format!("ct-{i}")))
+                            .child(
+                                div()
+                                    .size(px(30.))
+                                    .flex_none()
+                                    .rounded_full()
+                                    .bg(t.accent_soft)
+                                    .text_color(t.accent_deep)
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .font_weight(FontWeight::BOLD)
+                                    .child(initial),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(c.display().to_string()),
+                                    )
+                                    .child(div().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(11.)).text_color(t.muted).child(
+                                        if c.name.is_empty() {
+                                            stats.join(" · ")
+                                        } else {
+                                            format!("{}{}{}", c.address, if stats.is_empty() { "" } else { " · " }, stats.join(" · "))
+                                        },
+                                    )),
+                            )
+                            .child(
+                                button(
+                                    SharedString::from(format!("ct-star-{i}")),
+                                    t,
+                                    Kind::Ghost,
+                                    Some(if c.starred { "star-fill" } else { "star" }),
+                                    "",
+                                    true,
+                                )
+                                .text_color(if c.starred { t.gold } else { t.muted })
+                                .on_click(cx.listener(move |a, _, w, cx| {
+                                    let on = !contacts::list(&a.store, &addr, 1).ok().and_then(|v| v.into_iter().next()).is_some_and(|c| c.starred);
+                                    let _ = contacts::set_starred(&a.store, &addr, on);
+                                    let text = match &a.modal {
+                                        Some(Modal::Panel(Panel::Contacts { q, .. })) => q.read(cx).text().to_string(),
+                                        _ => String::new(),
+                                    };
+                                    a.open_contacts(&text, w, cx);
+                                })),
+                            )
+                            .child(button(SharedString::from(format!("ct-mail-{i}")), t, Kind::Ghost, Some("edit"), "写信", true).on_click(cx.listener(
+                                move |a, _, w, cx| {
+                                    a.modal = None;
+                                    a.compose_to(&addr2, w, cx);
+                                },
+                            )))
+                            .child(button(SharedString::from(format!("ct-find-{i}")), t, Kind::Ghost, Some("envelope"), "邮件", true).on_click(cx.listener(
+                                move |a, _, w, cx| {
+                                    a.close_modal(w, cx);
+                                    a.set_query(addr3.clone(), cx);
+                                },
+                            )))
+                            .child(button(SharedString::from(format!("ct-edit-{i}")), t, Kind::Ghost, None, "编辑", true).on_click(cx.listener(
+                                move |a, _, w, cx| {
+                                    let _ = &addr4;
+                                    a.open_contact_edit(Some(row_data.clone()), w, cx)
+                                },
+                            ))),
+                    );
+                }
+                let footer = modal_footer(t)
+                    .child(
+                        button("ct-new", t, Kind::Secondary, Some("plus"), "新建", false).on_click(cx.listener(|a, _, w, cx| a.open_contact_edit(None, w, cx))),
+                    )
+                    .child(
+                        button("ct-import", t, Kind::Ghost, Some("download"), "导入 vCard", false).on_click(cx.listener(|a, _, w, cx| a.import_vcard(w, cx))),
+                    )
+                    .child(button("ct-export", t, Kind::Ghost, Some("download"), "导出 vCard", false).on_click(cx.listener(|a, _, _, cx| a.export_vcard(cx))))
+                    .child(div().flex_1());
+                modal_shell(t, 720., "联系人", format!("{} 位 · 往来统计来自本机邮件", rows.len()), close).child(b).child(footer).into_any_element()
+            }
+            Panel::ContactEdit { is_new, starred, fields } => {
+                let labels = ["邮箱地址", "姓名", "公司", "电话", "备注"];
+                let mut b = body;
+                for (i, f) in fields.iter().enumerate() {
+                    let foc = f.read(cx).is_focused(window);
+                    b = b.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .child(div().w(px(64.)).flex_none().text_color(t.muted).text_size(px(12.)).child(labels[i]))
+                            .child(field_box(t, foc).flex_1().child(div().flex_1().child(f.clone()))),
+                    );
+                }
+                b = b.child(
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(t.muted)
+                        .child("Tab 切换栏位，回车保存。邮件里出现过的名字会自动识别，这里填的优先；写信时输入姓名也能联想到。"),
+                );
+                let is_new = *is_new;
+                let starred = *starred;
+                let addr = fields[0].read(cx).text().to_string();
+                let footer = modal_footer(t)
+                    .child(button("ce-back", t, Kind::Ghost, None, "返回列表", false).on_click(cx.listener(|a, _, w, cx| a.open_contacts("", w, cx))))
+                    .child(div().flex_1())
+                    .when(!is_new, |d| {
+                        d.child(button("ce-del", t, Kind::Ghost, Some("trash"), "清除手动信息", false).text_color(t.danger).on_click(cx.listener(
+                            move |a, _, w, cx| {
+                                let _ = contacts::delete(&a.store, &addr);
+                                a.open_contacts("", w, cx)
+                            },
+                        )))
+                    })
+                    .child(
+                        button("ce-star", t, Kind::Ghost, Some(if starred { "star-fill" } else { "star" }), if starred { "取消星标" } else { "星标" }, false)
+                            .on_click(cx.listener(|a, _, _, cx| {
+                                if let Some(Modal::Panel(Panel::ContactEdit { starred, .. })) = &mut a.modal {
+                                    *starred = !*starred;
+                                    cx.notify();
+                                }
+                            })),
+                    )
+                    .child(button("ce-save", t, Kind::Primary, None, "保存", false).on_click(cx.listener(|a, _, w, cx| a.save_contact(w, cx))));
+                modal_shell(t, 560., if is_new { "新建联系人" } else { "编辑联系人" }, "姓名 / 公司 / 电话 / 备注", close)
                     .child(b)
                     .child(footer)
                     .into_any_element()

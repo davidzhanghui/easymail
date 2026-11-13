@@ -24,6 +24,73 @@ impl MailApp {
                     ));
                 }
             }
+            Pop::Row(id) => {
+                let ids = self.targets(id);
+                let n = ids.len();
+                let rows: Vec<&ListItem> = self.items.iter().filter(|m| ids.contains(&m.id)).collect();
+                let any_unread = rows.iter().any(|m| !m.seen);
+                let any_unstarred = rows.iter().any(|m| !m.flagged);
+                let local = rows.first().is_some_and(|m| self.accounts.iter().any(|a| a.id == m.account_id && a.is_local()));
+                let can_archive = !local && rows.first().is_some_and(|m| m.folder_role != "archive" && self.has_role(m.account_id, "archive"));
+                let subject = rows.first().map(|m| m.subject.clone()).unwrap_or_default();
+                p = p.w(px(220.)).child(menu_title(t, if n > 1 { format!("{n} 封邮件") } else { one_line(&subject, 22) }));
+                let (i1, i2, i3, i4, i5, i6, i7) = (ids.clone(), ids.clone(), ids.clone(), ids.clone(), ids.clone(), ids.clone(), ids.clone());
+                if n == 1 {
+                    p = p.child(menu_row("rc-open", t, Some("envelope"), "打开", false).on_click(cx.listener(move |a, _, _, cx| {
+                        a.pop = None;
+                        a.reader_collapsed = false;
+                        a.open_message(id, cx);
+                    })));
+                }
+                p = p
+                    .child(
+                        menu_row("rc-seen", t, Some(if any_unread { "read" } else { "unread" }), if any_unread { "标为已读" } else { "标为未读" }, false)
+                            .on_click(cx.listener(move |a, _, _, cx| {
+                                a.pop = None;
+                                a.set_seen(i1.clone(), any_unread, cx)
+                            })),
+                    )
+                    .child(
+                        menu_row(
+                            "rc-star",
+                            t,
+                            Some(if any_unstarred { "star" } else { "star-fill" }),
+                            if any_unstarred { "加星标" } else { "取消星标" },
+                            false,
+                        )
+                        .on_click(cx.listener(move |a, _, _, cx| {
+                            a.pop = None;
+                            a.set_flagged(i2.clone(), any_unstarred, false, cx)
+                        })),
+                    )
+                    .child(menu_row("rc-move", t, Some("move"), "移动到…", false).on_click(cx.listener(move |a, ev: &ClickEvent, _, cx| {
+                        a.pop = Some((Pop::Move(i3.clone()), ev.position()));
+                        cx.notify();
+                    })))
+                    .child(menu_row("rc-snooze", t, Some("clock"), "稍后处理…", false).on_click(cx.listener(move |a, ev: &ClickEvent, _, cx| {
+                        a.pop = Some((Pop::Snooze(i4.clone()), ev.position()));
+                        cx.notify();
+                    })));
+                if can_archive {
+                    p = p.child(menu_row("rc-archive", t, Some("archive"), "归档", false).on_click(cx.listener(move |a, _, _, cx| {
+                        a.pop = None;
+                        a.to_role(i5.clone(), "archive", "已归档", cx)
+                    })));
+                }
+                if n == 1 {
+                    let s = subject.clone();
+                    p = p.child(menu_row("rc-copy", t, Some("draft"), "复制主题", false).on_click(cx.listener(move |a, _, _, cx| {
+                        a.pop = None;
+                        cx.write_to_clipboard(ClipboardItem::new_string(s.clone()));
+                        a.toast("已复制主题", false, cx);
+                    })));
+                }
+                p = p.child(menu_row("rc-del", t, Some("trash"), "删除", false).text_color(t.danger).on_click(cx.listener(move |a, _, w, cx| {
+                    a.pop = None;
+                    a.delete(i6.clone(), w, cx)
+                })));
+                let _ = i7;
+            }
             Pop::Tools => {
                 p = p.w(px(270.)).child(menu_title(t, "工具 · ⌘K 打开命令面板"));
                 use super::panels::Cmd;
@@ -35,6 +102,8 @@ impl MailApp {
                     (Cmd::Templates, "draft", "回复模板"),
                     (Cmd::Migrate, "archive", "账号间搬家"),
                     (Cmd::Diagnose, "shield", "连接诊断"),
+                    (Cmd::Contacts, "users", "联系人"),
+                    (Cmd::Invoices, "receipt", "发票汇总 / 按月导出"),
                     (Cmd::Backup, "download", "完整备份（可加密）"),
                     (Cmd::Restore, "refresh", "从备份恢复…"),
                     (Cmd::Slim, "trash", "安全瘦身"),

@@ -7,6 +7,7 @@ use super::line_input::{InputEvent, LineInput};
 use super::theme::{hex_css, palette, theme, Theme, ThemePref};
 use super::widgets::*;
 use super::*;
+use crate::core::calendar;
 use crate::core::db::Store;
 use crate::core::engine::{Engine, Evt, SyncState};
 use crate::core::model::{addrs_text, Account, Detail, Draft, Folder, ListItem, Stats};
@@ -79,6 +80,8 @@ pub enum DetailState {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Pop {
+    /// 邮件行右键菜单
+    Row(i64),
     /// 稍后处理的时间选择
     Snooze(Vec<i64>),
     /// 工具菜单（备份、瘦身、发件人、隐私报告…）
@@ -88,6 +91,31 @@ pub enum Pop {
     Move(Vec<i64>),
     Folder(i64),
     Account(i64),
+}
+
+/// 从列表拖出去的邮件（拖到侧栏文件夹上移动）
+#[derive(Clone)]
+pub struct DragMails {
+    pub ids: Vec<i64>,
+    pub label: String,
+}
+
+/// 拖拽时跟着鼠标的小标签
+pub struct DragGhost(pub String);
+
+impl Render for DragGhost {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme(cx).clone();
+        div()
+            .px(px(10.))
+            .py(px(6.))
+            .rounded(px(8.))
+            .bg(t.accent)
+            .text_color(t.paper)
+            .text_size(px(12.))
+            .shadow(vec![BoxShadow { color: t.shadow, offset: point(px(0.), px(4.)), blur_radius: px(12.), spread_radius: px(0.) }])
+            .child(self.0.clone())
+    }
 }
 
 pub enum Modal {
@@ -160,6 +188,8 @@ pub struct MailApp {
     list_gen: u64,
     pub selected: Option<i64>,
     pub checked: BTreeSet<i64>,
+    /// Shift 范围选择的起点（上一次点选的邮件）
+    pub anchor: Option<i64>,
     /// 当前打开的邮件。用 Rc：每帧渲染只复制指针，不复制可能几 MB 的 HTML
     pub detail: Option<Rc<Detail>>,
     /// (邮件 id, HTML 长度, 是否引用了远程资源)：正则只在换信时跑一次，不是每帧
@@ -204,6 +234,10 @@ pub struct MailApp {
     _subs: Vec<Subscription>,
     /// 当前模态的订阅：同一时间只有一个模态，换掉时旧订阅随之释放（以前一直往 _subs 里追加、从不清理）
     modal_sub: Option<Subscription>,
+    /// 当前打开的邮件里的日历邀请：（邮件 id，解析结果，原始 ics）
+    pub invite: Option<(i64, calendar::Invite, String)>,
+    /// 深色主题下这些邮件按原样显示（不反色）
+    mail_light: HashSet<i64>,
 }
 
 impl MailApp {
@@ -265,6 +299,7 @@ impl MailApp {
                 this.eng.request_sync(*id, None, true);
                 this.toast("已开始同步", false, cx);
             }
+            SidebarEvent::DropMails(ids, fid) => this.drop_mails(ids.clone(), *fid, cx),
             SidebarEvent::Import => this.open_import(window, cx),
             SidebarEvent::Settings => this.open_accounts(Tab::Accounts, false, window, cx),
         }));
@@ -338,6 +373,7 @@ impl MailApp {
             list_gen: 0,
             selected: None,
             checked: BTreeSet::new(),
+            anchor: None,
             detail: None,
             remote_cache: None,
             extras: None,
@@ -370,6 +406,8 @@ impl MailApp {
             _tasks: tasks,
             _subs: subs,
             modal_sub: None,
+            mail_light: HashSet::new(),
+            invite: None,
         };
         // 首屏同步读一次，免得窗口先空一下；之后的刷新都在后台
         let meta = Meta::fetch(&app.store);
@@ -853,6 +891,7 @@ impl MailApp {
     }
 
     fn close_detail(&mut self, cx: &mut Context<Self>) {
+        self.invite = None;
         self.selected = None;
         self.detail = None;
         self.detail_state = DetailState::Idle;
@@ -884,17 +923,28 @@ impl MailApp {
                 match r {
                     Ok(Some(d)) => {
                         let unseen = !d.seen;
+                        a.invite = messages::read_local_source(&a.store, id)
+                            .and_then(|raw| crate::core::parse::calendar_part(&raw))
+                            .and_then(|ics| calendar::parse(&ics).map(|i| (id, i, ics)));
                         a.detail = Some(Rc::new(d));
                         a.detail_state = DetailState::Ready;
                         if unseen {
-                            a.patch(&[id], Some(true), None);
-                            let eng = a.eng.clone();
-                            a.run(ops::set_flags(eng, vec![id], ops::FlagChange { seen: Some(true), flagged: None }), cx, |a, r, cx| {
-                                if let Err(e) = r {
-                                    a.toast(e.to_string(), true, cx);
-                                }
-                                a.load_meta(cx);
-                            });
+                            let secs: u64 = a.store.get_kv("mark_read_secs").and_then(|v| v.parse().ok()).unwrap_or(0);
+                            if secs == 0 {
+                                a.mark_opened_read(id, cx);
+                            } else {
+                                // 停留够久才标已读：期间换了别的邮件就不标
+                                cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                                    cx.background_executor().timer(Duration::from_secs(secs)).await;
+                                    this.update(cx, |a, cx| {
+                                        if a.selected == Some(id) && a.detail.as_ref().is_some_and(|d| d.id == id && !d.seen) {
+                                            a.mark_opened_read(id, cx);
+                                        }
+                                    })
+                                    .ok();
+                                })
+                                .detach();
+                            }
                         }
                     }
                     Ok(None) => a.detail_state = DetailState::Error("邮件不存在（可能已被删除）".into()),
@@ -914,6 +964,32 @@ impl MailApp {
             .ok();
         })
         .detach();
+    }
+
+    /// 打开的邮件标为已读（本地立即生效，远端走持久化队列）
+    fn mark_opened_read(&mut self, id: i64, cx: &mut Context<Self>) {
+        self.patch(&[id], Some(true), None);
+        let eng = self.eng.clone();
+        self.run(ops::set_flags(eng, vec![id], ops::FlagChange { seen: Some(true), flagged: None }), cx, |a, r, cx| {
+            if let Err(e) = r {
+                a.toast(e.to_string(), true, cx);
+            }
+            a.load_meta(cx);
+        });
+        cx.notify();
+    }
+
+    /// 回复日历邀请
+    pub fn rsvp(&mut self, id: i64, r: calendar::Rsvp, cx: &mut Context<Self>) {
+        self.toast("正在发送回复…", false, cx);
+        let eng = self.eng.clone();
+        self.run(calendar::respond(eng, id, r), cx, move |a, res, cx| match res {
+            Ok(()) => {
+                a.toast(format!("已回复组织者：{}", r.label()), false, cx);
+                cx.notify();
+            }
+            Err(e) => a.toast(format!("回复失败：{e:#}"), true, cx),
+        });
     }
 
     fn patch(&mut self, ids: &[i64], seen: Option<bool>, flagged: Option<bool>) {
@@ -1022,6 +1098,44 @@ impl MailApp {
             },
             cx,
         );
+    }
+
+    /// 把邮件拖到侧栏文件夹上：同一账号才能移动；已经在该文件夹里的忽略
+    fn drop_mails(&mut self, ids: Vec<i64>, folder_id: i64, cx: &mut Context<Self>) {
+        let Some(f) = self.folders.iter().find(|f| f.id == folder_id) else { return };
+        let acc = f.account_id;
+        let movable: Vec<i64> = self.items.iter().filter(|m| ids.contains(&m.id) && m.account_id == acc && m.folder_id != folder_id).map(|m| m.id).collect();
+        if movable.is_empty() {
+            let other = self.items.iter().any(|m| ids.contains(&m.id) && m.account_id != acc);
+            if other {
+                self.toast("不能跨账号拖动邮件（要复制到别的账号，用「账号间搬家」）", true, cx);
+            }
+            return;
+        }
+        self.move_to(movable, folder_id, cx);
+    }
+
+    /// 操作对象：右键 / 拖拽的邮件在已勾选集合里就是整批，否则只是它自己
+    pub fn targets(&self, id: i64) -> Vec<i64> {
+        if self.checked.contains(&id) {
+            self.checked.iter().copied().collect()
+        } else {
+            vec![id]
+        }
+    }
+
+    /// Shift 点选：把 anchor 到 id 之间（含）的邮件全部勾上
+    pub fn select_range(&mut self, id: i64) {
+        let pos = |x: i64| self.items.iter().position(|m| m.id == x);
+        let (Some(a), Some(b)) = (self.anchor.and_then(pos), pos(id)) else {
+            self.checked.insert(id);
+            self.anchor = Some(id);
+            return;
+        };
+        let (lo, hi) = (a.min(b), a.max(b));
+        for m in &self.items[lo..=hi] {
+            self.checked.insert(m.id);
+        }
     }
 
     pub fn move_to(&mut self, ids: Vec<i64>, folder_id: i64, cx: &mut Context<Self>) {
@@ -1908,6 +2022,7 @@ impl Render for MailApp {
                     .track_focus(&self.focus)
                     .on_action(cx.listener(|a, _: &NextMail, _, cx| a.go(1, cx)))
                     .on_action(cx.listener(|a, _: &PrevMail, _, cx| a.go(-1, cx)))
+                    .on_action(cx.listener(|a, _: &ShowShortcuts, _, cx| a.open_panel_shortcuts(cx)))
                     .on_action(cx.listener(|a, _: &NextInThread, _, cx| a.go_in_thread(1, cx)))
                     .on_action(cx.listener(|a, _: &PrevInThread, _, cx| a.go_in_thread(-1, cx)))
                     .on_action(cx.listener(|a, _: &Reply, w, cx| a.reply("reply", w, cx)))

@@ -47,6 +47,8 @@ pub struct Caps {
     pub id: bool,
     /// RFC 5819：一条 LIST 命令顺带返回每个文件夹的 STATUS
     pub list_status: bool,
+    /// RFC 5465：IDLE 时同时监听多个文件夹
+    pub notify: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -179,6 +181,7 @@ impl Imap {
             uidplus: caps.has_str("UIDPLUS"),
             id: caps.has_str("ID"),
             list_status: caps.has_str("LIST-STATUS"),
+            notify: caps.has_str("NOTIFY"),
         };
         if me.caps.id {
             let ver = super::config::VERSION;
@@ -199,6 +202,21 @@ impl Imap {
             }
         }
         any
+    }
+
+    /// 订阅「已订阅文件夹」+ 当前文件夹的新邮件 / 删除 / 标记变化（RFC 5465）。失败返回 false，调用方退回只监听收件箱
+    pub async fn enable_notify(&mut self) -> bool {
+        if !self.caps.notify {
+            return false;
+        }
+        let cmd = "NOTIFY SET (selected (MessageNew MessageExpunge FlagChange)) (subscribed (MessageNew (UIDNEXT MESSAGES) MessageExpunge FlagChange))";
+        match tokio::time::timeout(CMD_TIMEOUT, self.ss().run_command_and_check_ok(cmd)).await {
+            Ok(Ok(())) => true,
+            _ => {
+                log::info!("[imap] NOTIFY 订阅被服务器拒绝，只监听收件箱");
+                false
+            }
+        }
     }
 
     pub async fn noop(&mut self) -> Result<()> {

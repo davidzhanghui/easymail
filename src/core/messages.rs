@@ -209,6 +209,11 @@ pub fn store_body(store: &Store, msg_id: i64, raw: &[u8]) -> Result<Parsed> {
         ],
     )?;
     Store::fts_upsert(&c, msg_id, &subject, &parse::people_text(&from, &parsed.env.to, &parsed.env.cc), &parsed.text)?;
+    drop(c);
+    // 带 PDF 附件的邮件：顺手识别发票（失败不影响收信）
+    if parsed.atts.iter().any(|a| a.filename.to_lowercase().ends_with(".pdf") || a.content_type == "application/pdf") {
+        let _ = super::invoice::scan_message(store, msg_id, raw);
+    }
     Ok(parsed)
 }
 

@@ -170,7 +170,7 @@ pub fn parse_query(q: &str) -> ParsedQuery {
     out
 }
 
-fn like(s: &str) -> String {
+pub(crate) fn like(s: &str) -> String {
     let mut o = String::from("%");
     for c in s.chars() {
         if matches!(c, '%' | '_' | '\\') {
@@ -183,8 +183,8 @@ fn like(s: &str) -> String {
 }
 
 /// 发票的识别条件：附件里有 PDF / OFD，且主题、附件名里出现「发票 / invoice / 收据」之类的字眼
-const INVOICE_COND: &str = "m.has_att = 1 AND (m.att_json LIKE '%.pdf%' OR m.att_json LIKE '%.ofd%' OR m.att_json LIKE '%application/pdf%' OR m.body_state = 0)
-   AND (m.subject LIKE '%发票%' OR m.subject LIKE '%invoice%' OR m.subject LIKE '%收据%' OR m.subject LIKE '%receipt%' OR m.att_json LIKE '%发票%' OR m.att_json LIKE '%invoice%')";
+const INVOICE_COND: &str = "((m.has_att = 1 AND (m.att_json LIKE '%.pdf%' OR m.att_json LIKE '%.ofd%' OR m.att_json LIKE '%application/pdf%' OR m.body_state = 0)
+   AND (m.subject LIKE '%发票%' OR m.subject LIKE '%invoice%' OR m.subject LIKE '%收据%' OR m.subject LIKE '%receipt%' OR m.att_json LIKE '%发票%' OR m.att_json LIKE '%invoice%')) OR m.id IN (SELECT message_id FROM invoices WHERE is_invoice = 1))";
 
 /// 一个普通搜索词编译成的条件
 fn term_cond(t: &str, w: &mut Vec<String>, a: &mut Vec<Value>, negate: bool) {
@@ -714,6 +714,8 @@ pub fn contacts(store: &Store, q: &str) -> Result<Vec<Contact>> {
              FROM messages m JOIN folders f ON f.id = m.folder_id, json_each(m.to_json) j
              WHERE f.role = 'sent' AND (json_extract(j.value, '$.address') LIKE ?1 ESCAPE '\\' OR json_extract(j.value, '$.name') LIKE ?1 ESCAPE '\\')
              GROUP BY lower(json_extract(j.value, '$.address'))
+           UNION ALL
+           SELECT name, lower(address), 500 + starred * 2000 FROM contacts WHERE address LIKE ?1 ESCAPE '\\' OR name LIKE ?1 ESCAPE '\\'
          ) WHERE address IS NOT NULL GROUP BY address ORDER BY n DESC LIMIT 8",
     )?;
     let v = st

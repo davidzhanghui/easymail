@@ -21,6 +21,8 @@ pub enum SidebarEvent {
     FolderMenu(i64, Point<Pixels>),
     /// 立即同步某个账号
     Sync(i64),
+    /// 把邮件拖到了某个文件夹上
+    DropMails(Vec<i64>, i64),
     Import,
     Settings,
 }
@@ -257,6 +259,11 @@ impl Render for Sidebar {
                         })
                         .when(active, |d| d.bg(t.accent_soft).font_weight(FontWeight::SEMIBOLD))
                         .hover(|s| s.bg(if active { t.accent_soft } else { t.row_hover }))
+                        .drag_over::<DragMails>({
+                            let (soft, acc) = (theme.accent_soft, theme.accent);
+                            move |s, _, _, _| s.bg(soft).border_1().border_color(acc)
+                        })
+                        .on_drop(cx.listener(move |_, d: &DragMails, _, cx| cx.emit(SidebarEvent::DropMails(d.ids.clone(), fid))))
                         .child(icon(role_icon(&f.role), 13., if active { t.accent } else { t.muted }))
                         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(f.leaf()))
                         // 未同步的文件夹（如 Gmail 的「所有邮件 / 重要」）本地没有邮件，不显示服务器未读数，免得点进去对不上

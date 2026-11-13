@@ -64,6 +64,8 @@ struct SettingsForm {
     backfill: bool,
     // 以下存在 kv 里（键名与读取处保持一致）
     undo_secs: Entity<LineInput>,
+    mark_read_secs: Entity<LineInput>,
+    dark_mail: bool,
     check_updates: bool,
     strip_tracking: bool,
     export_dir: Entity<LineInput>,
@@ -107,6 +109,8 @@ impl AccountsModal {
             prefetch: input(cx, &s.prefetch_bodies.to_string(), ""),
             backfill: s.backfill,
             undo_secs: input(cx, &kv("undo_send_secs", "5"), "5"),
+            mark_read_secs: input(cx, &kv("mark_read_secs", "0"), "0"),
+            dark_mail: kv("dark_mail", "1") != "0",
             check_updates: kv("check_updates", "1") != "0",
             strip_tracking: kv("strip_tracking", "1") != "0",
             export_dir: input(cx, &kv("auto_export_dir", ""), "留空 = 关闭"),
@@ -500,9 +504,12 @@ impl AccountsModal {
         let flag = |b: bool| if b { "1" } else { "0" };
         let undo = num(&f.undo_secs, cx).unwrap_or(5).min(60);
         let days = num(&f.export_days, cx).unwrap_or(7).max(1);
+        let read_secs = num(&f.mark_read_secs, cx).unwrap_or(0).min(60);
         match store.save_settings(&s) {
             Ok(_) => {
                 store.set_kv("undo_send_secs", &undo.to_string());
+                store.set_kv("mark_read_secs", &read_secs.to_string());
+                store.set_kv("dark_mail", flag(f.dark_mail));
                 store.set_kv("check_updates", flag(f.check_updates));
                 store.set_kv("strip_tracking", flag(f.strip_tracking));
                 store.set_kv("auto_export_dir", &text(&f.export_dir, cx));
@@ -733,6 +740,16 @@ impl AccountsModal {
                         if let Err(e) = super::macos::set_autostart(on) {
                             cx.emit(AccountsEvent::Toast(e.to_string(), true));
                         }
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            ]))
+            .child(group(t, "阅读"))
+            .child(card(t, vec![
+                setting_row(t, "停留多久标为已读", "单位：秒。打开邮件后停留这么久才标已读；0 = 打开即标已读", num(&s.mark_read_secs)),
+                toggle_row("dark-mail", t, "深色主题下反色显示 HTML 邮件", "白底邮件在深色主题里变成深底浅字，图片保持原样；阅读区工具栏可随时切回原样", s.dark_mail)
+                    .on_click(cx.listener(|m, _, _, cx| {
+                        m.settings.dark_mail = !m.settings.dark_mail;
                         cx.notify();
                     }))
                     .into_any_element(),

@@ -1,7 +1,9 @@
 pub mod accounts;
 pub mod archive;
 pub mod backup_pack;
+pub mod calendar;
 pub mod config;
+pub mod contacts;
 pub mod crypto;
 pub mod db;
 pub mod engine;
@@ -9,6 +11,7 @@ pub mod error;
 pub mod extract;
 pub mod http;
 pub mod imap;
+pub mod invoice;
 pub mod logging;
 pub mod mailer;
 pub mod mcp;

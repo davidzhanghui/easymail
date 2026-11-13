@@ -289,6 +289,16 @@ impl MailApp {
         }
         let m = &self.items[ix];
         let id = m.id;
+        let drag_label = {
+            let n = self.targets(id).len();
+            if n > 1 {
+                format!("{n} 封邮件")
+            } else if m.subject.is_empty() {
+                "(无主题)".to_string()
+            } else {
+                one_line(&m.subject, 24)
+            }
+        };
         let selected = self.selected == Some(id);
         let checked = self.checked.contains(&id);
         let flagged = m.flagged;
@@ -317,13 +327,18 @@ impl MailApp {
                 }
             })
             .when(!m.seen, |d| d.child(div().absolute().left(px(13.)).top(px(41.)).size(px(9.)).rounded_full().bg(t.accent)))
-            .child(div().absolute().left(px(10.)).top(px(13.)).child(checkbox(("chk", id as u64), t, checked).on_click(cx.listener(move |a, _, _, cx| {
-                cx.stop_propagation();
-                if !a.checked.remove(&id) {
-                    a.checked.insert(id);
-                }
-                cx.notify();
-            }))))
+            .child(div().absolute().left(px(10.)).top(px(13.)).child(checkbox(("chk", id as u64), t, checked).on_click(cx.listener(
+                move |a, ev: &ClickEvent, _, cx| {
+                    cx.stop_propagation();
+                    if ev.modifiers().shift {
+                        a.select_range(id);
+                    } else if !a.checked.remove(&id) {
+                        a.checked.insert(id);
+                        a.anchor = Some(id);
+                    }
+                    cx.notify();
+                },
+            ))))
             .child(
                 div()
                     .flex()
@@ -415,8 +430,34 @@ impl MailApp {
                         a.set_flagged(vec![id], !flagged, true, cx)
                     })),
             )
-            .on_click(cx.listener(move |a, _, window, cx| {
+            // 拖到侧栏文件夹上移动；已勾选的邮件整批一起拖
+            .on_drag(DragMails { ids: self.targets(id), label: drag_label }, |d, _, _, cx| cx.new(|_| DragGhost(d.label.clone())))
+            // 右键：上下文菜单
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |a, ev: &MouseDownEvent, _, cx| {
+                    a.pop = None;
+                    a.toggle_pop(Pop::Row(id), ev.position, cx)
+                }),
+            )
+            .on_click(cx.listener(move |a, ev: &ClickEvent, window, cx| {
                 window.focus(&a.focus);
+                let m = ev.modifiers();
+                // Shift：范围选择；⌘：单个勾选 / 取消；都不按：打开邮件
+                if m.shift {
+                    a.select_range(id);
+                    cx.notify();
+                    return;
+                }
+                if m.platform {
+                    if !a.checked.remove(&id) {
+                        a.checked.insert(id);
+                    }
+                    a.anchor = Some(id);
+                    cx.notify();
+                    return;
+                }
+                a.anchor = Some(id);
                 a.reader_collapsed = false;
                 a.save_layout();
                 a.open_message(id, cx)

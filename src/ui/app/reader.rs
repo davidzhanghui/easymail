@@ -108,6 +108,87 @@ impl MailApp {
                     .into_any_element(),
             );
         }
+        if let Some((mid, inv, ics)) = self.invite.as_ref().filter(|(mid, ..)| *mid == d.id) {
+            let mid = *mid;
+            let mine = inv.my_status(&d.account_email);
+            let saved = self.store.get_kv(&format!("rsvp.{}", inv.uid)).and_then(|s| calendar::Rsvp::from_partstat(&s));
+            let status = saved.or_else(|| mine.and_then(|p| calendar::Rsvp::from_partstat(&p.partstat)));
+            let can_reply = inv.method == "REQUEST" && inv.organizer.as_ref().is_some_and(|o| !o.email.is_empty()) && !d.account_local;
+            let title = match inv.method.as_str() {
+                "CANCEL" => "活动已取消",
+                "REPLY" => "参会回复",
+                _ => "日历邀请",
+            };
+            let mut who = div().flex().gap(px(6.)).flex_wrap().text_size(px(11.5)).text_color(t.muted);
+            if let Some(o) = &inv.organizer {
+                who = who.child(format!("组织者：{}", if o.name.is_empty() { o.email.clone() } else { o.name.clone() }));
+            }
+            if !inv.attendees.is_empty() {
+                let acc = inv.attendees.iter().filter(|p| p.partstat == "ACCEPTED").count();
+                who = who.child(format!("· {} 人受邀，{} 人已接受", inv.attendees.len(), acc));
+            }
+            let mut card = div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .px(px(12.))
+                .py(px(10.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(t.border)
+                .bg(t.panel)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(icon("clock", 14., if inv.method == "CANCEL" { t.danger } else { t.accent }))
+                        .child(div().text_size(px(11.5)).text_color(t.muted).child(title))
+                        .child(div().flex_1())
+                        .when_some(status, |x, s| x.child(badge(t, format!("你{}", s.label()), false))),
+                )
+                .child(div().font_family(SERIF).text_size(px(16.)).font_weight(FontWeight::BOLD).text_color(t.ink).child(if inv.summary.is_empty() {
+                    "(无标题活动)".to_string()
+                } else {
+                    inv.summary.clone()
+                }))
+                .child(div().text_size(px(12.5)).text_color(t.ink_2).child(format!(
+                    "时间：{}{}",
+                    inv.when_text(),
+                    if inv.rrule.is_empty() { String::new() } else { "（重复活动）".into() }
+                )));
+            if !inv.location.is_empty() {
+                card = card.child(div().text_size(px(12.5)).text_color(t.ink_2).child(format!("地点：{}", inv.location)));
+            }
+            card = card.child(who);
+            let ics = ics.clone();
+            let uid = inv.uid.clone();
+            let mut btns = div().flex().gap(px(6.)).mt(px(6.));
+            if can_reply {
+                for (i, (r, label, kind)) in [
+                    (calendar::Rsvp::Accept, "接受", Kind::Primary),
+                    (calendar::Rsvp::Tentative, "待定", Kind::Secondary),
+                    (calendar::Rsvp::Decline, "拒绝", Kind::Secondary),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    btns = btns.child(
+                        button(SharedString::from(format!("rsvp-{i}")), t, kind, None, label, true)
+                            .on_click(cx.listener(move |a, _, _, cx| a.rsvp(mid, r, cx))),
+                    );
+                }
+            }
+            if inv.method != "CANCEL" && inv.method != "REPLY" {
+                btns = btns.child(button("cal-add", t, Kind::Ghost, Some("clock"), "添加到日历", true).on_click(cx.listener(move |a, _, _, cx| {
+                    match calendar::add_to_calendar(&ics, &uid) {
+                        Ok(()) => a.toast("已交给「日历」", false, cx),
+                        Err(e) => a.toast(format!("{e:#}"), true, cx),
+                    }
+                })));
+            }
+            rows.push(card.child(btns).into_any_element());
+        }
         if let Some(code) = &x.code {
             let c = code.clone();
             rows.push(
@@ -211,16 +292,18 @@ impl MailApp {
         let blocked = show_html && !remote && has_remote;
         let purge = d.folder_role == "trash" || local;
 
+        // 深色主题下反色显示 HTML 邮件（设置可关；工具栏可对当前这封切回原样）
+        let dark_mail = t.dark && show_html && self.store.get_kv("dark_mail").as_deref() != Some("0") && !self.mail_light.contains(&id);
         // 文档缓存：换信 / 换模式 / 放行图片 / 换主题才重建
         let key = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            (id, show_html, remote, t.id, d.html.len(), d.text.len()).hash(&mut h);
+            (id, show_html, remote, t.id, d.html.len(), d.text.len(), dark_mail).hash(&mut h);
             h.finish()
         };
         if self.doc.as_ref().map(|x| x.0) != Some(key) {
             let doc = if show_html {
-                webview::mail_document(&d.html, remote)
+                webview::mail_document(&d.html, remote, dark_mail)
             } else {
                 webview::text_document(&d.text, &hex_css(t.hex_ink), &hex_css(t.hex_paper), &hex_css(t.hex_muted), &hex_css(t.hex_accent))
             };
@@ -364,6 +447,17 @@ impl MailApp {
                                         .on_click(cx.listener(move |a, _, _, cx| a.allow_sender_images(addr.clone(), cx))),
                                 )
                             })
+                        })
+                        .when(t.dark && show_html, |x| {
+                            let light = self.mail_light.contains(&id);
+                            x.child(button("toggle-dark", t, Kind::Ghost, None, if light { "反色显示" } else { "原样显示" }, true).on_click(cx.listener(
+                                move |a, _, _, cx| {
+                                    if !a.mail_light.remove(&id) {
+                                        a.mail_light.insert(id);
+                                    }
+                                    cx.notify();
+                                },
+                            )))
                         })
                         .child(button("toggle-mode", t, Kind::Ghost, None, if self.text_mode { "原始排版" } else { "纯文本" }, true).on_click(cx.listener(
                             |a, _, _, cx| {

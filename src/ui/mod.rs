@@ -239,6 +239,7 @@ actions!(
         HideWindow,
         CycleTheme,
         CommandPalette,
+        ShowShortcuts,
         Undo
     ]
 );
@@ -265,6 +266,8 @@ pub fn bind_keys(cx: &mut App) {
         // 会话内上一封 / 下一封
         KeyBinding::new("[", PrevInThread, Some("MailList")),
         KeyBinding::new("]", NextInThread, Some("MailList")),
+        KeyBinding::new("?", ShowShortcuts, Some("MailList")),
+        KeyBinding::new("shift-/", ShowShortcuts, Some("MailList")),
         KeyBinding::new("c", Compose, Some("MailList")),
         KeyBinding::new("r", Reply, Some("MailList")),
         KeyBinding::new("a", ReplyAll, Some("MailList")),
@@ -311,6 +314,7 @@ pub fn menus() -> Vec<Menu> {
                 MenuItem::separator(),
                 MenuItem::action("搜索", FocusSearch),
                 MenuItem::action("命令面板…", CommandPalette),
+                MenuItem::action("快捷键一览", ShowShortcuts),
                 MenuItem::action("撤销移动 / 删除", Undo),
             ],
         },

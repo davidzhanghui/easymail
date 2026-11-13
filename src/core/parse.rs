@@ -341,6 +341,32 @@ pub fn attachment(raw: &[u8], index: usize) -> Option<(String, String, Vec<u8>)>
     Some((part_name(p, index), part_mime(p), p.contents().to_vec()))
 }
 
+/// 邮件里的 `text/calendar` 部分（日历邀请）：无论是 alternative 正文还是 .ics 附件。没有返回 None
+pub fn calendar_part(raw: &[u8]) -> Option<String> {
+    // 先用字节搜索快速排除绝大多数邮件，避免为此再完整解析一遍 MIME
+    if !raw.windows(13).any(|w| w.eq_ignore_ascii_case(b"text/calendar")) {
+        return None;
+    }
+    let m = MessageParser::default().parse(raw)?;
+    m.parts.iter().find_map(|p| {
+        let is_cal =
+            p.content_type().is_some_and(|c| c.ctype().eq_ignore_ascii_case("text") && c.subtype().is_some_and(|s| s.eq_ignore_ascii_case("calendar")));
+        is_cal.then(|| String::from_utf8_lossy(p.contents()).into_owned())
+    })
+}
+
+/// 全部 PDF 附件：(附件序号, 文件名, 内容)。序号与 [`attachment`] / att_json 的 index 一致
+pub fn pdf_attachments(raw: &[u8]) -> Vec<(usize, String, Vec<u8>)> {
+    let Some(m) = MessageParser::default().parse(raw) else { return vec![] };
+    m.attachments()
+        .enumerate()
+        .filter_map(|(i, p)| {
+            let name = part_name(p, i);
+            (name.to_lowercase().ends_with(".pdf") || part_mime(p) == "application/pdf").then(|| (i, name, p.contents().to_vec()))
+        })
+        .collect()
+}
+
 /// 全部非内嵌附件（转发时附带原附件）
 pub fn file_attachments(raw: &[u8]) -> Vec<(String, String, Vec<u8>)> {
     let Some(m) = MessageParser::default().parse(raw) else { return vec![] };

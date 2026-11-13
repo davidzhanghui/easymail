@@ -261,7 +261,7 @@ pub(crate) async fn eval_of(v: Retained<WKWebView>, cx: &AsyncApp, js: &str) -> 
 // ───────────────────────────── 文档 ─────────────────────────────
 
 /// HTML 邮件文档：CSP 默认拦截远程资源（追踪像素），用户点「显示图片」后放行。
-pub fn mail_document(html: &str, allow_remote: bool) -> String {
+pub fn mail_document(html: &str, allow_remote: bool, dark: bool) -> String {
     let csp = if allow_remote {
         // 「显示图片」只放行图片：外链样式表、字体、音视频仍然拦截（它们同样能用来追踪，且对阅读没有必要）
         "default-src 'none'; img-src * data: blob:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'"
@@ -269,6 +269,13 @@ pub fn mail_document(html: &str, allow_remote: bool) -> String {
         "default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'"
     };
     let cleaned = strip_dangerous(html);
+    // 深色：整页反色（白底变深灰、黑字变浅），再把图片 / 视频等反回来；hue-rotate 让反色后颜色不至于完全失真
+    let dark_css = if dark {
+        "html { background: #fff; filter: invert(.92) hue-rotate(180deg); }\
+img, video, picture, canvas, svg, [style*=\"background-image\"] { filter: invert(1) hue-rotate(180deg); }"
+    } else {
+        ""
+    };
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
 <meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\">\
@@ -279,6 +286,7 @@ img {{ max-width: 100%; height: auto; }}\
 table {{ max-width: 100%; }}\
 pre {{ white-space: pre-wrap; }}\
 blockquote {{ margin: 0 0 0 .8ex; border-left: 2px solid #ccc; padding-left: 1ex; color: #555; }}\
+{dark_css}\
 </style></head><body>{cleaned}</body></html>"
     )
 }
@@ -423,7 +431,7 @@ mod tests {
 
     #[test]
     fn document_blocks_remote_by_default() {
-        let d = mail_document("<p>hi</p><script>alert(1)</script><meta http-equiv=\"refresh\" content=\"0;url=x\">", false);
+        let d = mail_document("<p>hi</p><script>alert(1)</script><meta http-equiv=\"refresh\" content=\"0;url=x\">", false, false);
         assert!(d.contains("img-src data: blob:;"));
         assert!(!d.contains("<script>alert"));
         assert!(!d.contains("refresh"));
@@ -434,11 +442,13 @@ mod tests {
             "<META CONTENT='x>y' HTTP-EQUIV=refresh>",
             "<meta\nhttp-equiv=\"refresh\"\ncontent=\"0;url=https://evil.example\">",
         ] {
-            let d = mail_document(&format!("<p>hi</p>{evil}<p>after</p>"), false);
+            let d = mail_document(&format!("<p>hi</p>{evil}<p>after</p>"), false, false);
             assert!(!d.to_lowercase().contains("http-equiv=\"refresh") && !d.to_lowercase().contains("http-equiv=refresh"), "没拦住：{evil}");
             assert!(d.contains("<p>after</p>"));
         }
-        let d2 = mail_document("<p>hi</p>", true);
+        let d2 = mail_document("<p>hi</p>", true, false);
+        assert!(mail_document("<p>hi</p>", false, true).contains("invert("), "深色模式要带反色样式");
+        assert!(!d2.contains("invert("));
         assert!(d2.contains("img-src * data: blob:"));
     }
 

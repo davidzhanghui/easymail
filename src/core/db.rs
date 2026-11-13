@@ -249,6 +249,32 @@ pub const MIGRATIONS: &[&str] = &[
      DROP TABLE outbox;
      ALTER TABLE outbox_v2 RENAME TO outbox;
      CREATE INDEX IF NOT EXISTS idx_outbox_due ON outbox(state, send_at);",
+    // 16：发票归集。每个 PDF 附件一行；is_invoice = 0 只用来记「已扫描过、不是发票」，避免重复解析
+    "CREATE TABLE IF NOT EXISTS invoices (
+       id           INTEGER PRIMARY KEY,
+       message_id   INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+       att_index    INTEGER NOT NULL,
+       filename     TEXT NOT NULL DEFAULT '',
+       is_invoice   INTEGER NOT NULL DEFAULT 0,
+       amount_cents INTEGER,
+       seller       TEXT NOT NULL DEFAULT '',
+       buyer        TEXT NOT NULL DEFAULT '',
+       inv_date     TEXT NOT NULL DEFAULT '',
+       number       TEXT NOT NULL DEFAULT '',
+       kind         TEXT NOT NULL DEFAULT '',
+       UNIQUE (message_id, att_index)
+     );
+     CREATE INDEX IF NOT EXISTS idx_invoices_date ON invoices(is_invoice, inv_date);",
+    // 17：联系人。只存用户手动建立 / 修改过的（姓名、公司、电话、备注、星标）；往来统计实时从邮件里算
+    "CREATE TABLE IF NOT EXISTS contacts (
+       address    TEXT PRIMARY KEY,
+       name       TEXT NOT NULL DEFAULT '',
+       org        TEXT NOT NULL DEFAULT '',
+       phone      TEXT NOT NULL DEFAULT '',
+       note       TEXT NOT NULL DEFAULT '',
+       starred    INTEGER NOT NULL DEFAULT 0,
+       created_at INTEGER NOT NULL DEFAULT 0
+     );",
 ];
 
 /// 二元组索引是否已覆盖全部老数据（没补完时两字词搜索退回 LIKE，结果不缺）

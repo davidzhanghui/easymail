@@ -104,6 +104,12 @@ fn main() {
                     break;
                 }
             }
+            // 已缓存正文里的 PDF 发票补扫（每批 50 封，扫过的不重复）
+            while let Ok(n) = easymail::core::invoice::scan_backlog(&s, 50) {
+                if n == 0 {
+                    break;
+                }
+            }
             match easymail::core::messages::sweep_orphan_eml(&s) {
                 Ok(n) if n > 0 => log::info!("清理了 {n} 个孤儿 .eml"),
                 Ok(_) => {}

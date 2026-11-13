@@ -607,6 +607,107 @@ async fn e2e(t: &mut T, cx: &mut AsyncApp) {
     t.key(cx, "escape");
     t.check("备份面板：Esc 关闭", t.until(cx, 3, |a, _| a.modal.is_none()).await);
 
+    // Shift 范围选择、右键菜单、快捷键面板
+    t.with(cx, |a, _, cx| a.set_nav(Nav::View(View::All), cx));
+    t.check("全部邮件视图有邮件", t.until(cx, 10, |a, _| !a.loading && a.items.len() >= 2).await);
+    t.with(cx, |a, _, cx| {
+        a.checked.clear();
+        a.anchor = a.items.first().map(|m| m.id);
+        if let Some(last) = a.items.last().map(|m| m.id) {
+            a.select_range(last);
+        }
+        cx.notify();
+    });
+    t.check("Shift 范围选择：勾上起点到终点之间全部邮件", t.read(cx, |a, _| !a.items.is_empty() && a.checked.len() == a.items.len()).unwrap_or(false));
+    let first = t.read(cx, |a, _| a.items.first().map(|m| m.id)).flatten();
+    t.check("拖拽 / 右键的操作对象：已勾选就是整批", t.read(cx, |a, _| first.map(|id| a.targets(id).len() == a.items.len())).flatten().unwrap_or(false));
+    t.with(cx, |a, _, cx| {
+        a.checked.clear();
+        if let Some(id) = a.items.first().map(|m| m.id) {
+            a.toggle_pop_for_test(Pop::Row(id), cx);
+        }
+    });
+    t.wait(cx, 300).await;
+    t.shot(cx, "e2e-row-menu").await;
+    t.check("右键菜单能打开", t.read(cx, |a, _| matches!(a.pop, Some((Pop::Row(_), _)))).unwrap_or(false));
+    t.key(cx, "escape");
+    t.with(cx, |a, _, cx| a.open_panel_shortcuts(cx));
+    t.wait(cx, 300).await;
+    t.shot(cx, "e2e-shortcuts").await;
+    t.check("快捷键面板能打开", t.read(cx, |a, _| matches!(&a.modal, Some(Modal::Panel(crate::ui::app::panels::Panel::Shortcuts)))).unwrap_or(false));
+    t.key(cx, "escape");
+    t.check("快捷键面板 Esc 关闭", t.until(cx, 3, |a, _| a.modal.is_none()).await);
+
+    // 日历邀请卡片：给当前打开的邮件挂一个邀请，截图检查布局
+    {
+        let id = t.read(cx, |a, _| a.items.first().map(|m| m.id)).flatten().unwrap_or(0);
+        t.with(cx, |a, _, cx| a.open_message(id, cx));
+        t.check("日历：邮件打开", t.until(cx, 10, |a, _| a.detail.as_ref().is_some_and(|d| d.id == id)).await);
+        let ics = "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:e2e-1\r\nDTSTART:20991113T020000Z\r\nDTEND:20991113T030000Z\r\nSUMMARY:周会 评审\r\nLOCATION:会议室 A\r\nORGANIZER;CN=张三:mailto:zhang@x.com\r\nATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:me@local.test\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        t.with(cx, |a, _, cx| {
+            a.invite = crate::core::calendar::parse(ics).map(|i| (id, i, ics.to_string()));
+            cx.notify();
+        });
+        t.wait(cx, 400).await;
+        t.shot(cx, "e2e-invite").await;
+        t.check("日历：邀请已解析", t.read(cx, |a, _| a.invite.as_ref().is_some_and(|(_, i, _)| i.summary == "周会 评审")).unwrap_or(false));
+        t.with(cx, |a, _, cx| {
+            a.invite = None;
+            cx.notify();
+        });
+    }
+
+    // 联系人：列表有往来的人；新建时 Tab 在各栏间切换；保存后能搜到
+    t.with(cx, |a, w, cx| a.open_contacts("", w, cx));
+    t.wait(cx, 300).await;
+    t.check(
+        "联系人：列表里有往来对象",
+        t.read(cx, |a, _| matches!(&a.modal, Some(Modal::Panel(crate::ui::app::panels::Panel::Contacts { rows, .. })) if rows.iter().any(|c| c.address == "bob@local.test"))).unwrap_or(false),
+    );
+    t.shot(cx, "e2e-contacts").await;
+    t.with(cx, |a, w, cx| a.open_contact_edit(None, w, cx));
+    t.wait(cx, 300).await;
+    let ct_focus = |t: &T, cx: &mut AsyncApp| {
+        t.with(cx, |a, w, cx| match &a.modal {
+            Some(Modal::Panel(crate::ui::app::panels::Panel::ContactEdit { fields, .. })) => fields.iter().position(|f| f.read(cx).is_focused(w)),
+            _ => None,
+        })
+        .flatten()
+    };
+    t.check("联系人编辑：新建时焦点在邮箱", ct_focus(t, cx) == Some(0));
+    t.key(cx, "tab");
+    t.wait(cx, 150).await;
+    t.check("联系人编辑：Tab 到姓名", ct_focus(t, cx) == Some(1));
+    t.key(cx, "shift-tab");
+    t.wait(cx, 150).await;
+    t.check("联系人编辑：Shift-Tab 回邮箱", ct_focus(t, cx) == Some(0));
+    t.with(cx, |a, w, cx| {
+        if let Some(Modal::Panel(crate::ui::app::panels::Panel::ContactEdit { fields, .. })) = &a.modal {
+            fields[0].update(cx, |i, cx| i.set_text("e2e-friend@example.org", cx));
+            fields[1].update(cx, |i, cx| i.set_text("测试朋友", cx));
+        }
+        a.save_contact(w, cx);
+    });
+    t.wait(cx, 300).await;
+    t.check(
+        "联系人：保存后出现在列表",
+        t.read(cx, |a, _| matches!(&a.modal, Some(Modal::Panel(crate::ui::app::panels::Panel::Contacts { rows, .. })) if rows.iter().any(|c| c.address == "e2e-friend@example.org" && c.name == "测试朋友")))
+            .unwrap_or(false),
+    );
+    t.with(cx, |a, _, _| {
+        let _ = crate::core::contacts::delete(&a.store, "e2e-friend@example.org");
+    });
+    t.key(cx, "escape");
+    t.check("联系人：Esc 关闭", t.until(cx, 3, |a, _| a.modal.is_none()).await);
+
+    // 发票汇总面板：能打开，列表为空时给出提示，Esc 关闭
+    t.with(cx, |a, _, cx| a.open_invoices(None, cx));
+    t.wait(cx, 300).await;
+    t.check("发票汇总面板能打开", t.read(cx, |a, _| matches!(&a.modal, Some(Modal::Panel(crate::ui::app::panels::Panel::Invoices { .. })))).unwrap_or(false));
+    t.shot(cx, "e2e-invoices").await;
+    t.key(cx, "escape");
+    t.check("发票汇总面板 Esc 关闭", t.until(cx, 3, |a, _| a.modal.is_none()).await);
+
     // 写信窗口的「模板」菜单：模板很多时菜单限高可滚动，编辑器让出高度，底栏（发送按钮等）不被挤出窗口
     {
         use crate::ui::app::panels::{load_templates, save_templates, Template};
