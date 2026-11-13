@@ -184,6 +184,37 @@ mod tests {
         assert!(pdf_text(b"not a pdf").is_none());
     }
 
+    #[test]
+    fn coverage_dedupe_and_missing_amount() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(&dir.path().join("data")).unwrap();
+        crate::core::queries::tests::seed(&s);
+        {
+            let c = s.w();
+            // seed 里 1 号信「增值税发票已开具」在收件箱；再造：同一发票号码出现在两封信里、一封金额没识别
+            c.execute("UPDATE messages SET body_state = 1 WHERE id = 1", []).unwrap();
+            c.execute("INSERT INTO invoices(message_id, att_index, filename, is_invoice, amount_cents, number, inv_date) VALUES(1, 0, 'a.pdf', 1, 10000, 'N1', '2025-03-01')", []).unwrap();
+            c.execute("INSERT INTO invoices(message_id, att_index, filename, is_invoice, amount_cents, number, inv_date) VALUES(5, 0, 'b.pdf', 1, 10000, 'N1', '2025-03-02')", []).unwrap();
+            c.execute("INSERT INTO invoices(message_id, att_index, filename, is_invoice, amount_cents, number, inv_date) VALUES(2, 0, 'c.pdf', 1, NULL, 'N2', '2025-03-05')", []).unwrap();
+        }
+        let rows = list(&s, None).unwrap();
+        assert_eq!(rows.len(), 2, "同一发票号码只算一张");
+        let m = months(&s).unwrap();
+        assert_eq!(m, vec![("2025-03".to_string(), 2, 10000, 1)]);
+        let cov = coverage(&s).unwrap();
+        assert_eq!(cov.duplicates, 1);
+        // 候选：只有 1 号信主题含「发票」（2 号 Weekly report 不算）
+        assert_eq!(cov.candidates, 1);
+        assert_eq!(cov.recognized, 1);
+        assert!(cov.complete());
+        // 把 1 号信改成正文没取回、也没有发票行 → pending，汇总不完整
+        s.w().execute("DELETE FROM invoices WHERE message_id = 1", []).unwrap();
+        s.w().execute("UPDATE messages SET body_state = 0, uid = 99 WHERE id = 1", []).unwrap();
+        let cov = coverage(&s).unwrap();
+        assert_eq!((cov.pending, cov.unrecognized), (1, 0));
+        assert!(!cov.complete());
+    }
+
     /// 本机样本探测（需要 target/tmp/pdfs 里放 PDF；没有就跳过）：只统计，不打印内容
     #[test]
     fn local_samples_probe() {
@@ -254,14 +285,14 @@ pub fn scan_backlog(store: &Store, limit: usize) -> Result<usize> {
     Ok(n)
 }
 
-/// 待下载正文的疑似发票邮件（主题像发票、正文还没缓存），最新的在前
+/// 待下载正文的疑似发票邮件（主题像发票、正文还没缓存，与 `coverage` 的统计口径一致），最新的在前
 pub fn remote_candidates(store: &Store, limit: usize) -> Result<Vec<i64>> {
     let c = store.r();
-    let mut st = c.prepare(
-        "SELECT m.id FROM messages m JOIN accounts a ON a.id = m.account_id WHERE m.body_state = 0 AND m.uid > 0 AND a.provider != 'local'
-           AND (m.subject LIKE '%发票%' OR m.subject LIKE '%invoice%' OR m.subject LIKE '%收据%' OR m.subject LIKE '%receipt%' OR m.subject LIKE '%电子客票%')
-         ORDER BY m.date DESC LIMIT ?",
-    )?;
+    let mut st = c.prepare(&format!(
+        "SELECT m.id FROM messages m JOIN accounts a ON a.id = m.account_id JOIN folders f ON f.id = m.folder_id
+          WHERE m.body_state = 0 AND m.uid > 0 AND a.provider != 'local' AND f.role NOT IN ('trash','junk','sent','drafts') AND {SUBJECT_COND}
+         ORDER BY m.date DESC LIMIT ?"
+    ))?;
     let rows = st.query_map([limit as i64], |r| r.get(0))?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
@@ -285,13 +316,16 @@ pub struct InvoiceRow {
 const MONTH_EXPR: &str = "COALESCE(NULLIF(substr(i.inv_date, 1, 7), ''), strftime('%Y-%m', m.date / 1000, 'unixepoch', 'localtime'))";
 const DATE_EXPR: &str = "COALESCE(NULLIF(i.inv_date, ''), strftime('%Y-%m-%d', m.date / 1000, 'unixepoch', 'localtime'))";
 
+/// 去重后的发票：同一个发票号码（转发 / 多账号收到同一封）只算一张，取最早入库的那条；没有号码的各算各的
+const UNIQ: &str = "i.is_invoice = 1 AND i.id = (SELECT MIN(j.id) FROM invoices j WHERE j.is_invoice = 1 AND (CASE WHEN i.number != '' THEN j.number = i.number ELSE j.id = i.id END))";
+
 /// 发票列表；`month` = "2025-03" 时只看该月。日期新的在前
 pub fn list(store: &Store, month: Option<&str>) -> Result<Vec<InvoiceRow>> {
     let c = store.r();
     let sql = format!(
         "SELECT i.message_id, i.att_index, i.filename, i.amount_cents, i.seller, i.buyer, {DATE_EXPR}, i.number, i.kind, m.subject
            FROM invoices i JOIN messages m ON m.id = i.message_id
-          WHERE i.is_invoice = 1 AND (?1 IS NULL OR {MONTH_EXPR} = ?1) ORDER BY 7 DESC, i.id DESC"
+          WHERE {UNIQ} AND (?1 IS NULL OR {MONTH_EXPR} = ?1) ORDER BY 7 DESC, i.id DESC"
     );
     let mut st = c.prepare(&sql)?;
     let rows = st.query_map([month], |r| {
@@ -311,16 +345,57 @@ pub fn list(store: &Store, month: Option<&str>) -> Result<Vec<InvoiceRow>> {
     Ok(rows.collect::<std::result::Result<_, _>>()?)
 }
 
-/// 每月的 (月份, 张数, 合计分)，新的在前
-pub fn months(store: &Store) -> Result<Vec<(String, i64, i64)>> {
+/// 每月的 (月份, 张数, 已识别金额合计分, 金额没识别出来的张数)，新的在前
+pub fn months(store: &Store) -> Result<Vec<(String, i64, i64, i64)>> {
     let c = store.r();
     let sql = format!(
-        "SELECT {MONTH_EXPR} AS mo, COUNT(*), COALESCE(SUM(i.amount_cents), 0) FROM invoices i JOIN messages m ON m.id = i.message_id
-          WHERE i.is_invoice = 1 GROUP BY mo ORDER BY mo DESC"
+        "SELECT {MONTH_EXPR} AS mo, COUNT(*), COALESCE(SUM(i.amount_cents), 0), SUM(i.amount_cents IS NULL) FROM invoices i JOIN messages m ON m.id = i.message_id
+          WHERE {UNIQ} GROUP BY mo ORDER BY mo DESC"
     );
     let mut st = c.prepare(&sql)?;
-    let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, Option<i64>>(3)?.unwrap_or(0))))?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// 覆盖情况：汇总只含「已识别」的发票，下面这些邮件是没统计进去的
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Coverage {
+    /// 主题像发票 / 收据 / 电子客票的邮件（不含垃圾箱、已删除、已发送、草稿）
+    pub candidates: i64,
+    /// 其中已经识别出 PDF 发票的
+    pub recognized: i64,
+    /// 正文还没取回本地（识别不了，需要点「扫描」）
+    pub pending: i64,
+    /// 正文在本地，但没找到可识别的 PDF 发票（链接式发票、OFD、扫描件、图片等）
+    pub unrecognized: i64,
+    /// 重复的发票张数（同一发票号码被多封邮件带着，已合并）
+    pub duplicates: i64,
+}
+
+impl Coverage {
+    /// 汇总是否可视为完整：没有取不回 / 识别不了的邮件
+    pub fn complete(&self) -> bool {
+        self.pending == 0 && self.unrecognized == 0
+    }
+}
+
+const SUBJECT_COND: &str =
+    "(m.subject LIKE '%发票%' OR m.subject LIKE '%invoice%' OR m.subject LIKE '%收据%' OR m.subject LIKE '%receipt%' OR m.subject LIKE '%电子客票%')";
+
+pub fn coverage(store: &Store) -> Result<Coverage> {
+    let c = store.r();
+    let sql = format!(
+        "SELECT COUNT(*),
+                COALESCE(SUM(EXISTS (SELECT 1 FROM invoices i WHERE i.message_id = m.id AND i.is_invoice = 1)), 0),
+                COALESCE(SUM(NOT EXISTS (SELECT 1 FROM invoices i WHERE i.message_id = m.id AND i.is_invoice = 1) AND m.body_state = 0), 0),
+                COALESCE(SUM(NOT EXISTS (SELECT 1 FROM invoices i WHERE i.message_id = m.id AND i.is_invoice = 1) AND m.body_state != 0), 0)
+           FROM messages m JOIN folders f ON f.id = m.folder_id
+          WHERE f.role NOT IN ('trash','junk','sent','drafts') AND {SUBJECT_COND}"
+    );
+    let (candidates, recognized, pending, unrecognized) = c.query_row(&sql, [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+    let all: i64 = c.query_row("SELECT COUNT(*) FROM invoices i WHERE i.is_invoice = 1", [], |r| r.get(0))?;
+    let uniq: i64 = c.query_row(&format!("SELECT COUNT(*) FROM invoices i WHERE {UNIQ}"), [], |r| r.get(0))?;
+    Ok(Coverage { candidates, recognized, pending, unrecognized, duplicates: all - uniq })
 }
 
 pub fn fmt_amount(cents: i64) -> String {
@@ -427,7 +502,7 @@ mod store_tests {
         let rows = list(&s, None).unwrap();
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!((rows[0].amount_cents, rows[0].date.as_str()), (Some(12350), "2025-03-08"));
-        assert_eq!(months(&s).unwrap(), vec![("2025-03".to_string(), 1, 12350)]);
+        assert_eq!(months(&s).unwrap(), vec![("2025-03".to_string(), 1, 12350, 0)]);
         assert!(list(&s, Some("2024-01")).unwrap().is_empty());
         // 补扫不会重复处理已扫过的
         assert_eq!(scan_backlog(&s, 10).unwrap(), 0);

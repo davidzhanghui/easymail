@@ -58,9 +58,10 @@ pub enum Panel {
     /// 发票汇总：列表 / 月份筛选 / 扫描 / 按月导出
     Invoices {
         rows: Vec<invoice::InvoiceRow>,
-        months: Vec<(String, i64, i64)>,
+        months: Vec<(String, i64, i64, i64)>,
         month: Option<String>,
         scanning: bool,
+        cov: invoice::Coverage,
     },
     /// 完整备份：可选密码（留空 = 不加密）
     Backup {
@@ -463,10 +464,11 @@ impl MailApp {
     pub fn open_invoices(&mut self, month: Option<String>, cx: &mut Context<Self>) {
         let rows = invoice::list(&self.store, month.as_deref()).unwrap_or_default();
         let months = invoice::months(&self.store).unwrap_or_default();
-        self.open_panel(Panel::Invoices { rows, months, month, scanning: false }, cx);
+        let cov = invoice::coverage(&self.store).unwrap_or_default();
+        self.open_panel(Panel::Invoices { rows, months, month, scanning: false, cov }, cx);
     }
 
-    /// 扫描：先补扫已缓存的邮件，再把主题像发票、正文还没下载的邮件取回来识别（最多 200 封）
+    /// 扫描：先补扫已缓存的邮件，再把主题像发票、正文还没下载的邮件全部取回来识别（取不回的会继续算作「未统计」）
     fn scan_invoices(&mut self, cx: &mut Context<Self>) {
         let Some(Modal::Panel(Panel::Invoices { scanning, .. })) = &mut self.modal else { return };
         if *scanning {
@@ -478,7 +480,7 @@ impl MailApp {
         self.run(
             async move {
                 while invoice::scan_backlog(&store, 100)? > 0 {}
-                let ids = invoice::remote_candidates(&store, 200)?;
+                let ids = invoice::remote_candidates(&store, 5000)?;
                 let mut fetched = 0;
                 for id in &ids {
                     if eng.ensure_body(*id).await.is_ok() {
@@ -1378,8 +1380,9 @@ impl MailApp {
                     .child(footer)
                     .into_any_element()
             }
-            Panel::Invoices { rows, months, month, scanning } => {
+            Panel::Invoices { rows, months, month, scanning, cov } => {
                 let scanning = *scanning;
+                let cov = cov.clone();
                 let total: i64 = rows.iter().filter_map(|r| r.amount_cents).sum();
                 let unknown = rows.iter().filter(|r| r.amount_cents.is_none()).count();
                 let mut chips = div().flex().flex_wrap().gap(px(6.));
@@ -1397,18 +1400,49 @@ impl MailApp {
                         .child(label)
                 };
                 chips = chips.child(chip("inv-all".into(), "全部".into(), month.is_none()).on_click(cx.listener(|a, _, _, cx| a.open_invoices(None, cx))));
-                for (i, (m, n, sum)) in months.iter().enumerate() {
+                for (i, (m, n, sum, miss)) in months.iter().enumerate() {
                     let target = m.clone();
                     chips = chips.child(
                         chip(
                             SharedString::from(format!("inv-m-{i}")),
-                            format!("{m} · {n} 张 · {}", invoice::fmt_amount(*sum)),
+                            if *miss > 0 {
+                                format!("{m} · {n} 张 · {}+（{miss} 张金额未识别）", invoice::fmt_amount(*sum))
+                            } else {
+                                format!("{m} · {n} 张 · {}", invoice::fmt_amount(*sum))
+                            },
                             month.as_deref() == Some(m.as_str()),
                         )
                         .on_click(cx.listener(move |a, _, _, cx| a.open_invoices(Some(target.clone()), cx))),
                     );
                 }
                 let mut b = body.child(chips);
+                // 有邮件没取回正文时禁止导出（会漏票）；覆盖情况：汇总只含已识别的发票，没统计进去的要明说，不让数字看起来像「全部」
+                if !cov.complete() {
+                    let mut parts = Vec::new();
+                    if cov.pending > 0 {
+                        parts.push(format!("{} 封还没取回正文（点「扫描」取回）", cov.pending));
+                    }
+                    if cov.unrecognized > 0 {
+                        parts.push(format!("{} 封没找到可识别的 PDF 发票（可能是链接式发票、OFD、图片或扫描件，需要手动处理）", cov.unrecognized));
+                    }
+                    b = b.child(
+                        div()
+                            .px(px(12.))
+                            .py(px(8.))
+                            .rounded(px(8.))
+                            .border_1()
+                            .border_color(t.danger)
+                            .bg(t.danger.opacity(0.06))
+                            .text_size(px(12.))
+                            .text_color(t.danger)
+                            .child(format!(
+                                "汇总不完整：主题像发票的邮件共 {} 封，只有 {} 封已识别出发票；{}。下面的张数和金额只包含已识别的，不是全部。",
+                                cov.candidates,
+                                cov.recognized,
+                                parts.join("；")
+                            )),
+                    );
+                }
                 if rows.is_empty() {
                     b = b.child(
                         div()
@@ -1454,20 +1488,30 @@ impl MailApp {
                     );
                 }
                 let sub = format!(
-                    "{} 张 · 合计 {}{}",
+                    "已识别 {} 张 · 已识别金额合计 {}{}{}",
                     rows.len(),
                     invoice::fmt_amount(total),
-                    if unknown > 0 { format!("（{unknown} 张金额未识别）") } else { String::new() }
+                    if unknown > 0 { format!("（另有 {unknown} 张金额未识别，未计入）") } else { String::new() },
+                    if cov.duplicates > 0 { format!(" · 已合并 {} 张重复", cov.duplicates) } else { String::new() }
                 );
                 let footer = modal_footer(t)
-                    .child(div().flex_1().text_size(px(11.5)).text_color(t.muted).child("PDF 文字用本地规则解析，扫描件识别不了；金额请以原件为准"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(11.5))
+                            .text_color(t.muted)
+                            .child("只统计主题含发票 / 收据 / receipt / 电子客票 的邮件；金额取自 PDF 文字，请以原件为准"),
+                    )
                     .child(
                         disabled(button("inv-scan", t, Kind::Secondary, Some("refresh"), if scanning { "扫描中…" } else { "扫描" }, false), scanning)
                             .on_click(cx.listener(|a, _, _, cx| a.scan_invoices(cx))),
                     )
                     .child(
-                        disabled(button("inv-export", t, Kind::Primary, Some("download"), "导出所选月份 ZIP", false), month.is_none() || rows.is_empty())
-                            .on_click(cx.listener(|a, _, _, cx| a.export_invoices(cx))),
+                        disabled(
+                            button("inv-export", t, Kind::Primary, Some("download"), "导出所选月份 ZIP", false),
+                            month.is_none() || rows.is_empty() || cov.pending > 0,
+                        )
+                        .on_click(cx.listener(|a, _, _, cx| a.export_invoices(cx))),
                     );
                 modal_shell(t, 760., "发票汇总", sub, close).child(b).child(footer).into_any_element()
             }

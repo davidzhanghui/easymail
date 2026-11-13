@@ -93,7 +93,6 @@ impl Render for Sidebar {
         let mut col = div()
             .flex()
             .flex_col()
-            .min_h_full()
             .px(px(12.))
             .pt(px(16.))
             .pb(px(18.))
@@ -162,7 +161,13 @@ impl Render for Sidebar {
                 );
             }
         }
-        col = col.child(div().text_size(px(11.)).text_color(t.muted).px(px(10.)).mt(px(20.)).mb(px(8.)).child("账  号"));
+        let mut acc_col = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .px(px(12.))
+            .pb(px(8.))
+            .child(div().text_size(px(11.)).text_color(t.muted).px(px(10.)).mt(px(14.)).mb(px(8.)).child("账  号"));
         let accounts = snap.accounts.clone();
         for a in accounts.iter() {
             let list: Vec<&Folder> = snap.folders.iter().filter(|f| f.account_id == a.id).collect();
@@ -173,7 +178,7 @@ impl Render for Sidebar {
             let st = snap.sync.get(&a.id).cloned().unwrap_or_default();
             let aid = a.id;
             let local = a.is_local();
-            col = col.child(
+            acc_col = acc_col.child(
                 div()
                     .flex()
                     .items_center()
@@ -222,10 +227,10 @@ impl Render for Sidebar {
                 continue;
             }
             if !a.last_error.is_empty() && !st.syncing {
-                col = col.child(div().px(px(10.)).pl(px(18.)).py(px(6.)).text_size(px(11.5)).text_color(t.danger).child(one_line(&a.last_error, 120)));
+                acc_col = acc_col.child(div().px(px(10.)).pl(px(18.)).py(px(6.)).text_size(px(11.5)).text_color(t.danger).child(one_line(&a.last_error, 120)));
             }
             if list.is_empty() {
-                col = col.child(div().h(px(H_ROW)).flex().items_center().pl(px(18.)).text_size(px(12.)).text_color(t.muted).child(if st.syncing {
+                acc_col = acc_col.child(div().h(px(H_ROW)).flex().items_center().pl(px(18.)).text_size(px(12.)).text_color(t.muted).child(if st.syncing {
                     "正在读取文件夹…"
                 } else {
                     "尚未同步"
@@ -237,7 +242,7 @@ impl Render for Sidebar {
                 let active = snap.nav == Nav::Folder(f.id);
                 let fid = f.id;
                 let group = SharedString::from(format!("fg-{fid}"));
-                col = col.child(
+                acc_col = acc_col.child(
                     div()
                         .id(SharedString::from(format!("folder-{fid}")))
                         .group(group.clone())
@@ -291,8 +296,15 @@ impl Render for Sidebar {
                 );
             }
         }
-        let col = col
-            .child(div().flex_1().min_h(px(18.)))
+        let bottom = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .px(px(12.))
+            .pt(px(8.))
+            .pb(px(14.))
+            .border_t_1()
+            .border_color(t.border_soft)
             .child(
                 button("side-import", t, Kind::Ghost, Some("download"), "导入邮件", true)
                     .justify_start()
@@ -311,7 +323,20 @@ impl Render for Sidebar {
                 fmt_num(snap.stats.archived),
                 fmt_num(snap.stats.with_body)
             )));
-        // 外层只负责滚动；内层 flex 列的子项一律不收缩（否则内容超高时条目会被压扁）
-        div().id("sidebar").flex_none().w(px(snap.width)).h_full().bg(t.panel_2).overflow_y_scroll().child(col).into_any_element()
+        // 三段：上面的视图（固定）· 账号区（自己滚动）· 底部的导入 / 设置（固定）。账号再多也不会把底部挤出窗口
+        let top = col.pb(px(0.)).min_h(px(0.));
+        let accounts_area = div().id("sidebar-accounts").flex_1().min_h(px(0.)).overflow_y_scroll().child(acc_col);
+        div()
+            .id("sidebar")
+            .flex_none()
+            .w(px(snap.width))
+            .h_full()
+            .bg(t.panel_2)
+            .flex()
+            .flex_col()
+            .child(top.flex_none())
+            .child(accounts_area)
+            .child(bottom)
+            .into_any_element()
     }
 }

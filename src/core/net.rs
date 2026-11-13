@@ -235,6 +235,29 @@ pub async fn tls_wrap(host: &str, tcp: TcpStream) -> Result<Conn> {
 
 /// 连接并（除本机回环外）立即 TLS。
 pub async fn connect(host: &str, port: u16, proxy: Option<&Proxy>, tls: bool) -> Result<Conn> {
+    // 经代理时：代理出口到某些服务（实测 Outlook）会把大部分新连接卡住不动，通的那条 1～3 秒就好。
+    // 与其干等 30 秒，不如同时开 3 条连接、谁先通用谁（其余自动丢弃），6 秒都没通就换一轮，最多 3 轮。
+    // 只对「超时」重试；证书 / 认证 / 拒绝连接这类立即报错的直接返回
+    if proxy.is_some() && tls {
+        const ROUNDS: u32 = 5;
+        const WIDTH: usize = 3;
+        const PER_ROUND: Duration = Duration::from_secs(6);
+        for n in 1..=ROUNDS {
+            let attempts: Vec<_> = (0..WIDTH).map(|_| Box::pin(connect_once(host, port, proxy, tls))).collect();
+            match tokio::time::timeout(PER_ROUND, futures::future::select_ok(attempts)).await {
+                Ok(Ok((c, _rest))) => return Ok(c),
+                // 全部返回了错误：有一条不是超时类（证书、认证等）就直接报它
+                Ok(Err(e)) if !e.to_string().contains("超时") => return Err(e),
+                _ if n < ROUNDS => log::info!("[net] {host}:{port} 第 {n} 轮 {} 秒没通，换一轮重试", PER_ROUND.as_secs()),
+                _ => bail!("连接 {host}:{port} 超时（timeout）：代理出口不稳定，已连续试了 {ROUNDS} 轮"),
+            }
+        }
+        unreachable!("最后一轮一定返回");
+    }
+    connect_once(host, port, proxy, tls).await
+}
+
+async fn connect_once(host: &str, port: u16, proxy: Option<&Proxy>, tls: bool) -> Result<Conn> {
     let tcp = tunnel(host, port, proxy).await?;
     tcp.set_nodelay(true).ok();
     if tls {

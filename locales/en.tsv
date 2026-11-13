@@ -641,3 +641,8 @@ Tab 切换栏位，回车保存。邮件里出现过的名字会自动识别，�
 {}：{} 封、{}（{}）	{}: {} messages, {} ({})
 · {} 人受邀，{} 人已接受	· {} invited, {} accepted
  · {} 人受邀，{} 人已接受	 · {} invited, {} accepted
+已识别 {} 张 · 已识别金额合计 {}{}{}	{} invoices recognised · recognised amount total {}{}{}
+（另有 {} 张金额未识别，未计入）	 ({} more with unrecognised amounts, not included)
+ · 已合并 {} 张重复	 · {} duplicates merged
+只统计主题含发票 / 收据 / receipt / 电子客票 的邮件；金额取自 PDF 文字，请以原件为准	Only mail whose subject contains 发票 / 收据 / receipt / 电子客票 is counted; amounts come from PDF text, check against the original
+{} 封还没取回正文（点「扫描」取回）	{} messages haven't had their body fetched (click "Scan")
