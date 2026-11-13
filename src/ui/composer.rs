@@ -1170,7 +1170,9 @@ impl Render for Composer {
         let vp = window.viewport_size();
         let h = (f32::from(vp.height) * 0.9).clamp(460., 780.);
         let shell = if self.window_mode {
-            window_shell(&t, title_of(&self.draft.mode), sub, close).size_full()
+            // 用窗口的确定尺寸而不是 100%：百分比宽度在嵌套 flex 里会退化成内容宽度，
+            // 地址行就挤成一小截（写信窗口里出现过）
+            window_shell(&t, title_of(&self.draft.mode), sub, close).w(px(f32::from(vp.width))).h(px(f32::from(vp.height)))
         } else {
             modal_shell(&t, 760., title_of(&self.draft.mode), sub, close).relative().h(px(h))
         };
