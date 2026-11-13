@@ -431,6 +431,14 @@ impl MailApp {
                     .on_click(cx.listener(|a, _, _, cx| a.sync_now(cx))),
             )
             .child(
+                button("app-tools", t, Kind::Secondary, None, "工具", false)
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(|a, ev: &ClickEvent, _, cx| {
+                        let p = ev.position();
+                        a.toggle_pop(Pop::Tools, point(p.x - px(220.), px(56.)), cx)
+                    })),
+            )
+            .child(
                 button("theme-btn", t, Kind::Secondary, Some("palette"), if auto { "跟随系统".to_string() } else { cur.name.to_string() }, false)
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(|a, ev: &ClickEvent, _, cx| {

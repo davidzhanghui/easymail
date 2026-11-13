@@ -3,7 +3,7 @@
 //!
 //! 场景：
 //!   shots  只截图（看外观用，配合任意数据目录）
-//!   promo  宣传片素材：抓拍新邮件到达、逐字搜索、十套配色等真实状态序列（配合 scripts/screenshots.sh 的演示数据）
+//!   promo  宣传片素材：抓拍新邮件到达、逐字搜索、十一套配色等真实状态序列（配合 scripts/screenshots.sh 的演示数据）
 //!   e2e    完整流程（tests/ui_e2e.rs 准备好 GreenMail 账号与邮件后调用）
 
 use super::app::{DetailState, MailApp, Modal, Nav, Pop};
@@ -261,7 +261,7 @@ async fn promo(t: &mut T, cx: &mut AsyncApp) {
         t.shot(cx, "p-blocked").await;
     }
 
-    // 4. 十套配色（阅读周报）
+    // 4. 十一套配色（阅读周报）
     let id = t.read(cx, |a, _| a.items.iter().find(|m| m.subject.contains("周报")).map(|m| m.id)).flatten();
     if let Some(id) = id {
         t.with(cx, |a, _, cx| a.open_message(id, cx));

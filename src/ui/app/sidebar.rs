@@ -32,8 +32,8 @@ impl EventEmitter<SidebarEvent> for Sidebar {}
 pub struct Sidebar {
     app: WeakEntity<MailApp>,
     store: Store,
-    /// 折叠起来的账号（kv `collapsed`）
-    collapsed: HashSet<i64>,
+    /// 展开的账号（kv `account_open`）。不在这里的账号默认折叠，包括以后新加的账号。
+    expanded: HashSet<i64>,
     _observe: Subscription,
 }
 
@@ -53,18 +53,18 @@ struct Snapshot {
 
 impl Sidebar {
     pub fn new(app: &Entity<MailApp>, store: Store, cx: &mut Context<Self>) -> Self {
-        let collapsed = store.get_kv("collapsed").and_then(|s| serde_json::from_str::<Vec<i64>>(&s).ok()).unwrap_or_default().into_iter().collect();
+        let expanded = store.get_kv("account_open").and_then(|s| serde_json::from_str::<Vec<i64>>(&s).ok()).unwrap_or_default().into_iter().collect();
         // MailApp 的任何变化都重绘侧栏（nav、未读数、同步状态、宽度……）
         let _observe = cx.observe(app, |_, _, cx| cx.notify());
-        Sidebar { app: app.downgrade(), store, collapsed, _observe }
+        Sidebar { app: app.downgrade(), store, expanded, _observe }
     }
 
     fn toggle_collapsed(&mut self, account: i64, cx: &mut Context<Self>) {
-        if !self.collapsed.remove(&account) {
-            self.collapsed.insert(account);
+        if !self.expanded.remove(&account) {
+            self.expanded.insert(account);
         }
-        let v: Vec<i64> = self.collapsed.iter().copied().collect();
-        self.store.set_kv("collapsed", &serde_json::to_string(&v).unwrap_or_default());
+        let v: Vec<i64> = self.expanded.iter().copied().collect();
+        self.store.set_kv("account_open", &serde_json::to_string(&v).unwrap_or_default());
         cx.notify();
     }
 
@@ -174,7 +174,7 @@ impl Render for Sidebar {
             if a.is_local() && list.is_empty() {
                 continue;
             }
-            let closed = self.collapsed.contains(&a.id);
+            let closed = !self.expanded.contains(&a.id);
             let st = snap.sync.get(&a.id).cloned().unwrap_or_default();
             let aid = a.id;
             let local = a.is_local();
@@ -190,13 +190,14 @@ impl Render for Sidebar {
                             .flex_1()
                             .min_w_0()
                             .items_center()
-                            .h(px(H_ROW))
+                            .h(px(36.))
                             .px(px(8.))
                             .rounded(px(7.))
                             .cursor_pointer()
                             .hover(|s| s.bg(t.row_hover))
-                            .text_size(px(11.5))
-                            .text_color(t.ink_2)
+                            .text_size(px(15.))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(t.ink)
                             .child(
                                 div().mr(px(4.)).child(
                                     icon("caret", 12., t.muted)
@@ -204,7 +205,7 @@ impl Render for Sidebar {
                                 ),
                             )
                             .child(dot(t.named(&a.color), 7.).mr(px(7.)))
-                            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(if local {
+                            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::BOLD).child(if local {
                                 "本地归档".to_string()
                             } else {
                                 a.email.clone()

@@ -222,6 +222,10 @@ pub struct MailApp {
     thread_scrolled: Option<i64>,
     /// 命令面板列表的滚动句柄（↑↓ 选择时让选中项保持可见）
     palette_scroll: ScrollHandle,
+    /// 回复模板列表的滚动句柄（用来画滚动条）
+    templates_scroll: ScrollHandle,
+    /// 本地规则列表的滚动句柄（用来画滚动条）
+    rules_scroll: ScrollHandle,
     pub sync: HashMap<i64, SyncState>,
     pub toasts: Vec<Toast>,
     toast_seq: u64,
@@ -399,6 +403,8 @@ impl MailApp {
             thread_scroll: ScrollHandle::new(),
             thread_scrolled: None,
             palette_scroll: ScrollHandle::new(),
+            templates_scroll: ScrollHandle::new(),
+            rules_scroll: ScrollHandle::new(),
             sync: HashMap::new(),
             toasts: vec![],
             toast_seq: 0,

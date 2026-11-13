@@ -1163,18 +1163,31 @@ impl MailApp {
                 let (field, action, target) = (*field, *action, *target);
                 let focused = value.read(cx).is_focused(window);
                 let folder_name = |id: Option<i64>| id.and_then(|i| self.folders.iter().find(|f| f.id == i)).map(|f| f.label()).unwrap_or_default();
-                let mut b = body.child(
-                    div()
-                        .text_size(px(11.5))
-                        .text_color(t.muted)
-                        .child("新信同步进收件箱时按顺序匹配；移动 / 归档 / 删除类规则每封信只执行第一条命中的。只处理之后到达的新信。"),
-                );
+                let scroll = self.rules_scroll.clone();
+                let thumb = t.muted;
+                let vp = f32::from(window.viewport_size().height);
+                let shell_h = (vp * 0.88).clamp(520., 740.).min((vp - 16.).max(360.));
+                let mut rules_box = div()
+                    .id("rule-list")
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .flex()
+                    .flex_col()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.rules_scroll)
+                    .pr(px(12.));
+                if list.is_empty() {
+                    rules_box = rules_box.child(div().py(px(18.)).text_center().text_size(px(12.)).text_color(t.muted).child("还没有规则"));
+                }
                 for (i, r) in list.iter().enumerate() {
                     let id = r.id;
                     let on = r.enabled;
                     let fl = rules::FIELDS.iter().find(|f| f.0 == r.field).map(|f| f.1).unwrap_or("");
                     let al = rules::ACTIONS.iter().find(|f| f.0 == r.action).map(|f| f.1).unwrap_or("");
-                    b = b.child(
+                    rules_box = rules_box.child(
                         row(SharedString::from(format!("rule-{i}")))
                             .child(check_row(SharedString::from(format!("rule-on-{i}")), t, on, "").on_click(cx.listener(move |a, _, _, cx| {
                                 let _ = rules::set_enabled(&a.store, id, !on);
@@ -1185,7 +1198,21 @@ impl MailApp {
                                     crate::i18n::tr(&format!(
                                         "{fl}包含「{}」→ {al}{}",
                                         r.value,
-                                        if r.action == "move" { format!("「{}」", folder_name(r.target)) } else { String::new() }
+                                        if r.action == "move" {
+                                            let name = folder_name(r.target);
+                                            let mail = r
+                                                .target
+                                                .and_then(|id| self.folders.iter().find(|f| f.id == id))
+                                                .and_then(|f| {
+                                                    self.accounts.iter().find(|a| a.id == f.account_id).map(|a| {
+                                                        if a.is_local() { "本地归档".to_string() } else { a.email.clone() }
+                                                    })
+                                                })
+                                                .unwrap_or_default();
+                                            if mail.is_empty() { format!("「{name}」") } else { format!("「{mail} / {name}」") }
+                                        } else {
+                                            String::new()
+                                        }
                                     ))
                                     .into_owned(),
                                 ),
@@ -1224,34 +1251,160 @@ impl MailApp {
                     }
                     r
                 };
-                b = b
-                    .child(div().h(px(1.)).bg(t.border_soft).my(px(8.)))
-                    .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).child("新建规则"))
+                let action_labels: [(&str, &str); 5] =
+                    [("move", "移到文件夹"), ("read", "标为已读"), ("star", "加星标"), ("archive", "归档"), ("delete", "放进垃圾箱")];
+                let action_key = rules::ACTIONS[action].0;
+                let typed = value.read(cx).text();
+                let needle = typed.trim().to_string();
+                let field_name = rules::FIELDS[field].1;
+                let mailbox = target.and_then(|id| self.folders.iter().find(|f| f.id == id)).and_then(|f| {
+                    self.accounts.iter().find(|a| a.id == f.account_id).map(|a| if a.is_local() { "本地归档".to_string() } else { a.email.clone() })
+                });
+                let action_note = match action_key {
+                    "move" => "选好后，在下面点这个邮箱里的目标文件夹。",
+                    "read" => "新信一到收件箱就标成已读。每个邮箱都会执行。",
+                    "star" => "新信加上星标，仍留在收件箱。每个邮箱都会执行。",
+                    "archive" => "新信会被移出收件箱，放进各自邮箱的归档。每个邮箱都会执行。",
+                    _ => "新信会被放进各自邮箱的垃圾箱，不是彻底删除。每个邮箱都会执行。",
+                };
+                let preview = if needle.is_empty() {
+                    "先在上面写下要找的文字，比如某个发件人的邮箱，或主题里的「发票」。".to_string()
+                } else if action_key == "move" && target.is_none() {
+                    format!("找到{field_name}里包含「{needle}」的新信后，还要在下面点一个文件夹。")
+                } else if action_key == "move" {
+                    format!(
+                        "以后：{field_name}包含「{needle}」的新信（仅 {}）会移到「{}」。",
+                        mailbox.as_deref().unwrap_or("这个邮箱"),
+                        folder_name(target)
+                    )
+                } else {
+                    let verb = match action_key {
+                        "read" => "标为已读，仍留在收件箱",
+                        "star" => "加上星标，仍留在收件箱",
+                        "archive" => "被归档，从收件箱移走",
+                        _ => "被放进垃圾箱",
+                    };
+                    format!("以后：{field_name}包含「{needle}」的新信，会{verb}。")
+                };
+                let step = |n: &'static str, title: &'static str| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .mt(px(10.))
+                        .child(
+                            div()
+                                .size(px(18.))
+                                .flex_none()
+                                .rounded_full()
+                                .bg(t.accent_soft)
+                                .text_color(t.accent_deep)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_size(px(11.))
+                                .font_weight(FontWeight::BOLD)
+                                .child(n),
+                        )
+                        .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).child(title))
+                };
+                let mut form = div()
+                    .id("rule-form")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(px(22.))
+                    .pt(px(4.))
+                    .pb(px(12.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(div().mt(px(4.)).text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).child("新建规则"))
+                    .child(step("1", "如何筛选新进邮件"))
+                    .child(div().text_size(px(11.5)).text_color(t.muted).child("选一项，再写下要包含的文字。不用写完整，也不区分大小写。"))
                     .child(chips(&rules::FIELDS, field, "rf", |p, i| {
                         if let Panel::Rules { field, .. } = p {
                             *field = i
                         }
                     }))
                     .child(field_box(t, focused).flex_none().child(div().flex_1().child(value.clone())))
-                    .child(chips(&rules::ACTIONS, action, "ra", |p, i| {
+                    .child(step("2", "怎么处理"))
+                    .child(chips(&action_labels, action, "ra", |p, i| {
                         if let Panel::Rules { action, .. } = p {
                             *action = i
                         }
-                    }));
-                if rules::ACTIONS[action].0 == "move" {
-                    b = b.child(self.folder_chips(t, "rt", target, cx, |p, f| {
-                        if let Panel::Rules { target, .. } = p {
-                            *target = Some(f)
-                        }
-                    }));
+                    }))
+                    .child(div().text_size(px(11.5)).text_color(t.muted).child(action_note));
+                if action_key == "move" {
+                    form = form
+                        .child(step("3", "放到哪个文件夹"))
+                        .child(div().text_size(px(11.5)).text_color(t.muted).child("点一个文件夹。规则只处理这个邮箱以后的新信，不会挪到别的邮箱。"))
+                        .child(self.folder_chips(t, "rt", target, cx, |p, f| {
+                            if let Panel::Rules { target, .. } = p {
+                                *target = Some(f)
+                            }
+                        }));
                 }
+                let rules_wrap = div().relative().h(px(160.)).flex_none().mx(px(14.)).rounded(px(8.)).border_1().border_color(t.border_soft).child(rules_box).child(
+                    canvas(
+                        |bounds, _, _| bounds,
+                        move |bounds, _, window, _| {
+                            let max = scroll.max_offset().height;
+                            if max <= px(0.5) || bounds.size.height <= px(24.) {
+                                return;
+                            }
+                            let view = bounds.size.height;
+                            let thumb_h = (view * (view / (view + max))).max(px(24.)).min(view);
+                            let top = bounds.top() + (view - thumb_h) * ((-scroll.offset().y).clamp(px(0.), max) / max);
+                            window.paint_quad(
+                                fill(Bounds::new(point(bounds.right() - px(6.), top), size(px(4.), thumb_h)), thumb.opacity(0.55)).corner_radii(px(2.)),
+                            );
+                        },
+                    )
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .bottom_0()
+                    .w(px(10.)),
+                );
+                let column = div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        div()
+                            .flex_none()
+                            .px(px(22.))
+                            .pt(px(12.))
+                            .pb(px(8.))
+                            .text_size(px(11.5))
+                            .text_color(t.muted)
+                            .child("新信同步进收件箱时按顺序匹配；移动 / 归档 / 删除类规则每封信只执行第一条命中的。只处理之后到达的新信。"),
+                    )
+                    .child(rules_wrap)
+                    .child(form);
+                let preview_bar = div()
+                    .flex_none()
+                    .px(px(22.))
+                    .py(px(8.))
+                    .bg(t.accent_soft)
+                    .text_size(px(12.5))
+                    .text_color(t.ink)
+                    .child(preview);
                 let footer = modal_footer(t).child(div().flex_1()).child(button("rule-add", t, Kind::Primary, Some("plus"), "添加规则", false).on_click(
                     cx.listener(|a, _, _, cx| {
                         let Some(Modal::Panel(Panel::Rules { field, action, target, value, .. })) = &a.modal else { return };
+                        let account_id = if rules::ACTIONS[*action].0 == "move" {
+                            target.and_then(|fid| a.folders.iter().find(|f| f.id == fid).map(|f| f.account_id))
+                        } else {
+                            None
+                        };
                         let r = rules::Rule {
                             field: rules::FIELDS[*field].0.into(),
                             action: rules::ACTIONS[*action].0.into(),
                             target: *target,
+                            account_id,
                             value: value.read(cx).text(),
                             ..Default::default()
                         };
@@ -1261,7 +1414,12 @@ impl MailApp {
                         }
                     }),
                 ));
-                modal_shell(t, 640., "本地规则", format!("{} 条", list.len()), close).child(b).child(footer).into_any_element()
+                modal_shell(t, 640., "本地规则", format!("{} 条", list.len()), close)
+                    .h(px(shell_h))
+                    .child(column)
+                    .child(preview_bar)
+                    .child(footer)
+                    .into_any_element()
             }
             Panel::Migrate { src, dest, progress, result } => {
                 let (src, dest, progress, result) = (*src, *dest, *progress, result.clone());
@@ -1570,9 +1728,25 @@ impl MailApp {
             }
             Panel::Contacts { rows, q } => {
                 let focused = q.read(cx).is_focused(window);
-                let mut b = body.child(field_box(t, focused).child(div().flex_1().child(q.clone())));
+                // 搜索框在滚动区外面，列表单独滚动，输入时不会被顶走。
+                let search = div()
+                    .flex_none()
+                    .px(px(22.))
+                    .pt(px(12.))
+                    .pb(px(8.))
+                    .child(field_box(t, focused).child(div().flex_1().child(q.clone())));
+                let mut list = div()
+                    .id("ct-list")
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .px(px(22.))
+                    .pt(px(4.))
+                    .pb(px(14.))
+                    .max_h(px(460.))
+                    .overflow_y_scroll();
                 if rows.is_empty() {
-                    b = b.child(
+                    list = list.child(
                         div()
                             .py(px(24.))
                             .text_center()
@@ -1591,7 +1765,7 @@ impl MailApp {
                     if c.received + c.sent > 0 {
                         stats.push(format!("收 {} · 发 {} · 最近 {}", c.received, c.sent, fmt_short(c.last)));
                     }
-                    b = b.child(
+                    list = list.child(
                         row(SharedString::from(format!("ct-{i}")))
                             .child(
                                 div()
@@ -1675,6 +1849,7 @@ impl MailApp {
                     )
                     .child(button("ct-export", t, Kind::Ghost, Some("download"), "导出 vCard", false).on_click(cx.listener(|a, _, _, cx| a.export_vcard(cx))))
                     .child(div().flex_1());
+                let b = div().flex().flex_col().child(search).child(list);
                 modal_shell(t, 720., "联系人", format!("{} 位 · 往来统计来自本机邮件", rows.len()), close).child(b).child(footer).into_any_element()
             }
             Panel::ContactEdit { is_new, starred, fields } => {
@@ -1763,9 +1938,24 @@ impl MailApp {
             }
             Panel::Templates { list, name, body: tb } => {
                 let (f1, f2) = (name.read(cx).is_focused(window), tb.focus_handle(cx).is_focused(window));
-                // 布局：上面是独立滚动的模板列表（占剩余高度），下面「新建模板」表单固定不动。
-                // 以前列表和表单在同一个滚动区里，模板一多表单就被压扁，正文框无法输入。
-                let mut listing = div().id("tp-list").flex().flex_col().gap(px(2.)).flex_1().min_h(px(60.)).overflow_y_scroll().px(px(22.)).py(px(10.));
+                // 外壳必须有确定高度：父级是随内容收缩的包裹层，max_h(90%) 算不出来，
+                // 列表就会按内容无限长高，窗口被顶出屏幕，滚动条也不会出现。
+                let vp = f32::from(window.viewport_size().height);
+                let shell_h = (vp * 0.88).clamp(320., 680.).min(vp - 16.);
+                let scroll = self.templates_scroll.clone();
+                let thumb = t.muted;
+                // 上面是独立滚动的模板列表，下面「新建模板」表单固定不动。
+                let mut listing = div()
+                    .id("tp-list")
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.templates_scroll)
+                    .px(px(22.))
+                    .py(px(10.));
                 if list.is_empty() {
                     listing = listing.child(div().py(px(18.)).text_center().text_size(px(12.)).text_color(t.muted).child("还没有模板，在下面新建一个。"));
                 }
@@ -1843,12 +2033,36 @@ impl MailApp {
                             .text_color(t.muted)
                             .child("在写信窗口点「模板」插入。Tab 在名称和正文之间切换。"),
                     )
-                    .child(listing)
+                    .child(
+                        div().relative().flex().flex_col().flex_1().min_h_0().child(listing).child(
+                            canvas(
+                                |bounds, _, _| bounds,
+                                move |bounds, _, window, _| {
+                                    let max = scroll.max_offset().height;
+                                    if max <= px(0.5) || bounds.size.height <= px(24.) {
+                                        return;
+                                    }
+                                    let view = bounds.size.height;
+                                    let thumb_h = (view * (view / (view + max))).max(px(24.)).min(view);
+                                    let top = bounds.top() + (view - thumb_h) * ((-scroll.offset().y).clamp(px(0.), max) / max);
+                                    window.paint_quad(
+                                        fill(Bounds::new(point(bounds.right() - px(7.), top), size(px(4.), thumb_h)), thumb.opacity(0.55))
+                                            .corner_radii(px(2.)),
+                                    );
+                                },
+                            )
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .bottom_0()
+                            .w(px(10.)),
+                        ),
+                    )
                     .child(form);
                 let footer = modal_footer(t)
                     .child(div().flex_1())
                     .child(button("tp-add", t, Kind::Primary, Some("plus"), "添加模板", false).on_click(cx.listener(|a, _, w, cx| a.add_template(w, cx))));
-                modal_shell(t, 620., "回复模板", format!("{} 个", list.len()), close).child(b).child(footer).into_any_element()
+                modal_shell(t, 620., "回复模板", format!("{} 个", list.len()), close).h(px(shell_h)).child(b).child(footer).into_any_element()
             }
         }
     }

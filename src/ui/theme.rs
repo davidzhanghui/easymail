@@ -1,4 +1,4 @@
-//! 主题：10 套配色 + 「跟随系统」（浅色 / 深色各选一套）。界面代码只引用语义色。
+//! 主题：11 套配色 + 「跟随系统」（浅色 / 深色各选一套）。界面代码只引用语义色。
 
 use super::palettes::{Palette, PALETTES};
 use gpui::{rgb, App, Global, Hsla, WindowAppearance};
@@ -152,9 +152,11 @@ mod tests {
 
     #[test]
     fn palettes_complete_and_resolve() {
-        assert_eq!(PALETTES.len(), 10);
+        assert_eq!(PALETTES.len(), 11);
+        assert_eq!(PALETTES.iter().filter(|p| !p.dark).count(), 8);
         assert_eq!(PALETTES.iter().filter(|p| p.dark).count(), 3);
-        assert_eq!(palette("nope").id, "moss");
+        assert_eq!(palette("nope").id, "light");
+        assert_eq!(palette("light").name, "Light");
         let p = ThemePref { pref: "auto".into(), light: "teal".into(), dark: "dusk".into() };
         assert_eq!(p.resolve(WindowAppearance::Dark), "dusk");
         assert_eq!(p.resolve(WindowAppearance::Light), "teal");

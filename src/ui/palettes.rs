@@ -1,4 +1,4 @@
-//! 10 套配色。
+//! 11 套配色。
 
 pub struct Palette {
     pub id: &'static str,
@@ -30,7 +30,36 @@ pub struct Palette {
     pub overlay_rgb: u32,
 }
 
-pub const PALETTES: [Palette; 10] = [
+pub const PALETTES: [Palette; 11] = [
+    Palette {
+        id: "light",
+        name: "Light",
+        dark: false,
+        bg: 0xf5f5f7,
+        panel: 0xffffff,
+        panel_2: 0xf7f7f8,
+        border: 0xe4e4e7,
+        border_soft: 0xeeeeef,
+        ink: 0x1a1a1a,
+        ink_2: 0x4a4a4a,
+        body_ink: 0x242424,
+        muted: 0x8a8a8a,
+        faint: 0xb5b5b5,
+        accent: 0x2f6fed,
+        accent_deep: 0x1d4fb8,
+        accent_soft: 0xe7eefc,
+        on_accent: 0xffffff,
+        gold: 0xa8843f,
+        danger: 0xc44536,
+        live: 0x3d9a62,
+        toast_bg: 0x1f1f1f,
+        toast_fg: 0xf7f7f7,
+        row_hover: 0xf3f3f4,
+        paper: 0xffffff,
+        line_2: 0xd4d4d8,
+        shadow_rgb: 0x1a1a1a,
+        overlay_rgb: 0x1a1a1a,
+    },
     Palette {
         id: "moss",
         name: "墨绿",

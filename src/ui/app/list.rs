@@ -72,11 +72,7 @@ impl MailApp {
                             button("list-export", t, Kind::Ghost, Some("download"), "", true)
                                 .on_click(cx.listener(|a, ev: &ClickEvent, _, cx| a.toggle_pop(Pop::Export, ev.position(), cx))),
                         )
-                    })
-                    .child(
-                        button("list-tools", t, Kind::Ghost, Some("more"), "", true)
-                            .on_click(cx.listener(|a, ev: &ClickEvent, _, cx| a.toggle_pop(Pop::Tools, ev.position(), cx))),
-                    ),
+                    }),
             )
             .child(div().text_size(px(11.5)).text_color(t.muted).mt(px(3.)).child(crate::i18n::tr(&self.subtitle()).into_owned()))
             .when(self.q.is_empty() && !drafts && n_checked == 0, |d| {

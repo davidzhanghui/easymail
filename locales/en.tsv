@@ -225,6 +225,7 @@ Tab 切换栏位，回车保存。邮件里出现过的名字会自动识别，�
 封未读	unread
 尚未同步	Not synced yet
 展开阅读区	Show reading pane
+工具	Tools
 工具 · ⌘K 打开命令面板	Tools · ⌘K opens the command palette
 已交给「日历」	Handed to Calendar
 已从{}填好服务器地址	Server addresses filled in from {}
@@ -646,3 +647,25 @@ Tab 切换栏位，回车保存。邮件里出现过的名字会自动识别，�
  · 已合并 {} 张重复	 · {} duplicates merged
 只统计主题含发票 / 收据 / receipt / 电子客票 的邮件；金额取自 PDF 文字，请以原件为准	Only mail whose subject contains 发票 / 收据 / receipt / 电子客票 is counted; amounts come from PDF text, check against the original
 {} 封还没取回正文（点「扫描」取回）	{} messages haven't had their body fetched (click "Scan")
+还没有规则	No rules yet
+如何筛选新进邮件	How to filter incoming mail
+选一项，再写下要包含的文字。不用写完整，也不区分大小写。	Pick one, then type the text to look for. A partial match is enough, and capitals don't matter.
+怎么处理	What to do
+移到文件夹	Move to a folder
+放进垃圾箱	Move to Trash
+选好后，在下面点这个邮箱里的目标文件夹。	Then pick the destination folder in that mailbox below.
+新信一到收件箱就标成已读。每个邮箱都会执行。	New mail is marked read as soon as it reaches the inbox. This runs for every mailbox.
+新信加上星标，仍留在收件箱。每个邮箱都会执行。	New mail is starred and stays in the inbox. This runs for every mailbox.
+新信会被移出收件箱，放进各自邮箱的归档。每个邮箱都会执行。	New mail leaves the inbox and goes to that mailbox's archive. This runs for every mailbox.
+新信会被放进各自邮箱的垃圾箱，不是彻底删除。每个邮箱都会执行。	New mail goes to that mailbox's Trash. It is not deleted permanently. This runs for every mailbox.
+放到哪个文件夹	Which folder
+点一个文件夹。规则只处理这个邮箱以后的新信，不会挪到别的邮箱。	Pick a folder. The rule only handles later mail in this mailbox, and will not move mail to another mailbox.
+先在上面写下要找的文字，比如某个发件人的邮箱，或主题里的「发票」。	Type the text to look for above, such as a sender's address, or 发票 in the subject.
+这个邮箱	this mailbox
+找到{}里包含「{}」的新信后，还要在下面点一个文件夹。	When {} contains "{}", pick a folder below.
+以后：{}包含「{}」的新信（仅 {}）会移到「{}」。	From now on, new mail whose {} contains "{}" ({} only) is moved to "{}".
+以后：{}包含「{}」的新信，会{}。	From now on, new mail whose {} contains "{}" will {}.
+标为已读，仍留在收件箱	be marked read and stay in the inbox
+加上星标，仍留在收件箱	be starred and stay in the inbox
+被归档，从收件箱移走	be archived out of the inbox
+被放进垃圾箱	be moved to Trash
