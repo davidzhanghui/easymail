@@ -41,7 +41,7 @@ async-imap = { version = "0.12", default-features = false, features = ["runtime-
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 webpki-roots = "0.26"
-rustls-platform-verifier = "0.6"
+rustls-platform-verifier = "0.7"
 tokio-socks = "0.5"
 url = "2"
 percent-encoding = "2"
