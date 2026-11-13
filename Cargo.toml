@@ -1,6 +1,6 @@
 [package]
 name = "easymail"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2021"
 license = "MIT"
 description = "EasyMail · 迷你邮件 —— 本地优先的多账号邮件客户端与归档工具（Rust + GPUI，macOS）"
@@ -37,7 +37,7 @@ log = "0.4"
 
 # 网络：IMAP / SMTP / TLS / 代理
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util", "fs"] }
-async-imap = { version = "0.10", default-features = false, features = ["runtime-tokio"] }
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 webpki-roots = "0.26"

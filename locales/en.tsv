@@ -669,3 +669,49 @@ Tab 切换栏位，回车保存。邮件里出现过的名字会自动识别，�
 加上星标，仍留在收件箱	be starred and stay in the inbox
 被归档，从收件箱移走	be archived out of the inbox
 被放进垃圾箱	be moved to Trash
+无衬线	Sans
+衬线	Serif
+等宽	Mono
+苹方	PingFang
+宋体	Songti
+楷体	Kaiti
+小	Small
+正常	Normal
+大	Large
+超大	Huge
+字体	Font
+字号	Size
+粗体 ⌘B	Bold ⌘B
+斜体 ⌘I	Italic ⌘I
+下划线 ⌘U	Underline ⌘U
+删除线	Strikethrough
+文字颜色 / 背景色	Text / highlight color
+对齐方式	Alignment
+编号列表	Numbered list
+项目符号列表	Bulleted list
+减少缩进	Decrease indent
+增加缩进	Increase indent
+引用	Quote
+清除格式	Clear formatting
+格式选项	Formatting
+插入链接 ⌘K	Insert link ⌘K
+插入表情	Insert emoji
+左对齐	Align left
+居中	Center
+右对齐	Align right
+两端对齐	Justify
+文字颜色	Text color
+背景色	Highlight
+显示的文字	Text
+链接地址	Link
+移除链接	Remove link
+应用	Apply
+粘贴的图片	Pasted image
+展开会话正文	Show the thread
+只看这一封	This message only
+这封排版较复杂，在下面的时间线上点开单独看。	This one is a complex layout. Open it from the timeline below.
+本地接口	Local access
+与服务器逐封对账	Reconcile with the server
+把这个账号全部拉下来	Download this whole account
+暂停拉取	Pause download
+复制 {} 封，跳过已存在 {} 封，之前已复制 {} 封，失败 {} 封{}	Copied {}, skipped {} already there, {} copied earlier, {} failed{}

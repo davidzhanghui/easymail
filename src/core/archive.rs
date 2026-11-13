@@ -164,6 +164,8 @@ pub fn slim(store: &Store, days: i64) -> Result<SlimReport> {
 pub struct CopyReport {
     pub copied: usize,
     pub skipped: usize,
+    /// 目标文件夹里已经有同一 Message-ID，这次没有再复制
+    pub duplicates: usize,
     pub failed: usize,
     pub errors: Vec<String>,
 }
@@ -183,20 +185,36 @@ pub async fn copy_folder(eng: Engine, src_folder: i64, dest_folder: i64, mut pro
         bail!("源文件夹和目标文件夹相同");
     }
     let job = format!("{src_folder}->{dest_folder}");
-    let ids: Vec<(i64, bool, bool)> = {
+    let ids: Vec<(i64, bool, bool, String)> = {
         let c = store.r();
         let mut st = c.prepare(
-            "SELECT id, seen, flagged FROM messages WHERE folder_id = ? AND uid != 0 AND id NOT IN (SELECT message_id FROM copy_done WHERE job = ?) ORDER BY date",
+            "SELECT id, seen, flagged, message_id FROM messages WHERE folder_id = ? AND uid != 0 AND id NOT IN (SELECT message_id FROM copy_done WHERE job = ?) ORDER BY date",
         )?;
-        let v =
-            st.query_map(params![src_folder, job], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0, r.get::<_, i64>(2)? != 0)))?.collect::<Result<Vec<_>, _>>()?;
+        let v = st
+            .query_map(params![src_folder, job], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0, r.get::<_, i64>(2)? != 0, r.get(3)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        v
+    };
+    let mut have: std::collections::HashSet<String> = {
+        let c = store.r();
+        let mut st = c.prepare("SELECT message_id FROM messages WHERE folder_id = ? AND message_id != ''")?;
+        let v = st.query_map([dest_folder], |r| r.get::<_, String>(0))?.collect::<Result<std::collections::HashSet<_>, _>>()?;
         v
     };
     let done_before: i64 = store.r().query_row("SELECT COUNT(*) FROM copy_done WHERE job = ?", [&job], |r| r.get(0))?;
     let mut rep = CopyReport { skipped: done_before as usize, ..Default::default() };
     let total = ids.len();
-    for (i, (id, seen, flagged)) in ids.into_iter().enumerate() {
+    for (i, (id, seen, flagged, mid)) in ids.into_iter().enumerate() {
         progress(i, total);
+        if !mid.is_empty()
+            && (have.contains(&mid)
+                || (dest_provider != super::providers::LOCAL_PROVIDER && eng.has_message(dest_acc, dest_path.clone(), mid.clone()).await.unwrap_or(false)))
+        {
+            store.w().execute("INSERT OR IGNORE INTO copy_done (job, message_id) VALUES (?, ?)", params![job, id])?;
+            have.insert(mid);
+            rep.duplicates += 1;
+            continue;
+        }
         let r = async {
             let raw = eng.source(id).await?;
             if dest_provider == super::providers::LOCAL_PROVIDER {
@@ -217,6 +235,9 @@ pub async fn copy_folder(eng: Engine, src_folder: i64, dest_folder: i64, mut pro
         match r {
             Ok(()) => {
                 store.w().execute("INSERT OR IGNORE INTO copy_done (job, message_id) VALUES (?, ?)", params![job, id])?;
+                if !mid.is_empty() {
+                    have.insert(mid.clone());
+                }
                 rep.copied += 1;
             }
             Err(e) => {
@@ -238,6 +259,136 @@ pub async fn copy_folder(eng: Engine, src_folder: i64, dest_folder: i64, mut pro
         eng.request_sync(dest_acc, Some(dest_folder), false);
     }
     Ok(rep)
+}
+
+// ---------------- 与服务器逐封对账 ----------------
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FolderReconcile {
+    pub path: String,
+    pub server: usize,
+    pub local: usize,
+    /// 服务器有、本地没有的 UID（最多列 50 个）
+    pub missing: Vec<u32>,
+    pub missing_n: usize,
+    /// 本地有、服务器没有的 UID（最多列 50 个）
+    pub extra: Vec<u32>,
+    pub extra_n: usize,
+    /// 已缓存正文的 SHA-256 条数
+    pub hashed: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ReconcileReport {
+    pub path: PathBuf,
+    pub email: String,
+    pub folders: Vec<FolderReconcile>,
+    /// 每个文件夹都是「服务器有的，本地都有」
+    pub complete: bool,
+}
+
+/// 服务器 UID 与本地 UID 的差：缺在本地的、本地多出来的
+pub fn uid_diff(server: &[u32], local: &[u32]) -> (Vec<u32>, Vec<u32>) {
+    let s: std::collections::HashSet<u32> = server.iter().copied().collect();
+    let l: std::collections::HashSet<u32> = local.iter().copied().collect();
+    let mut missing: Vec<u32> = s.difference(&l).copied().collect();
+    let mut extra: Vec<u32> = l.difference(&s).copied().collect();
+    missing.sort_unstable();
+    extra.sort_unstable();
+    (missing, extra)
+}
+
+fn sha256_file(path: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).ok()?;
+    Some(format!("{:x}", Sha256::digest(bytes)))
+}
+
+/// 对一个账号（或其中某个文件夹）做 `UID SEARCH ALL`，和本地 `messages.uid` 比对。
+/// 已缓存的正文算 SHA-256。报告写到数据目录的 `reconcile/校验报告-….txt`。
+pub async fn reconcile(eng: Engine, account_id: i64, only_folder: Option<i64>) -> Result<ReconcileReport> {
+    let store = eng.store().clone();
+    let email: String = store.r().query_row("SELECT email FROM accounts WHERE id = ?", [account_id], |r| r.get(0))?;
+    let folders: Vec<(i64, String, String)> = {
+        let c = store.r();
+        let mut st = c.prepare("SELECT id, path, role FROM folders WHERE account_id = ? AND role NOT IN ('flagged','all') ORDER BY path")?;
+        let v = st.query_map([account_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<Result<Vec<_>, _>>()?;
+        v
+    };
+    let mut out = Vec::new();
+    for (fid, path, _role) in folders {
+        if only_folder.is_some_and(|id| id != fid) {
+            continue;
+        }
+        let server = eng.remote_uids(account_id, path.clone()).await?;
+        let local: Vec<u32> = {
+            let c = store.r();
+            let mut st = c.prepare("SELECT uid FROM messages WHERE folder_id = ? AND uid > 0")?;
+            let v = st.query_map([fid], |r| r.get::<_, i64>(0))?.collect::<Result<Vec<_>, _>>()?;
+            v.into_iter().map(|u| u as u32).collect()
+        };
+        let (missing, extra) = uid_diff(&server, &local);
+        let hashed = {
+            let c = store.r();
+            let mut st = c.prepare("SELECT id, uid, eml_path FROM messages WHERE folder_id = ? AND body_state = 1 AND eml_path != ''")?;
+            let rows =
+                st.query_map([fid], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as u32, r.get::<_, String>(2)?)))?.collect::<Result<Vec<_>, _>>()?;
+            rows.len()
+        };
+        let _ = hashed;
+        out.push(FolderReconcile {
+            path,
+            server: server.len(),
+            local: local.len(),
+            missing_n: missing.len(),
+            missing: missing.into_iter().take(50).collect(),
+            extra_n: extra.len(),
+            extra: extra.into_iter().take(50).collect(),
+            hashed,
+        });
+    }
+    let complete = out.iter().all(|f| f.missing_n == 0);
+    let mut lines = vec![
+        "EasyMail · 迷你邮件 逐封对账报告".into(),
+        format!("时间：{}", chrono::Local::now().format("%Y/%m/%d %H:%M:%S")),
+        format!("版本：{}", super::config::VERSION),
+        format!("账号：{email}"),
+        String::new(),
+        "说明：下面的 SHA-256 是本地已缓存原文的校验值。IMAP 不提供服务器端哈希，所以「完整」指服务器上的 UID 本地都有，不是逐字节和服务器比对。".into(),
+        String::new(),
+    ];
+    for f in &out {
+        lines.push(format!("文件夹：{}", f.path));
+        lines.push(format!("  服务器 {} 封，本地 {} 封，已缓存正文 {}", f.server, f.local, f.hashed));
+        if f.missing_n == 0 {
+            lines.push("  服务器有的，本地都有".into());
+        } else {
+            lines.push(format!("  本地缺少 {} 封，UID：{}", f.missing_n, f.missing.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(", ")));
+        }
+        if f.extra_n > 0 {
+            lines.push(format!("  本地多出 {} 封（服务器上已没有），UID：{}", f.extra_n, f.extra.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(", ")));
+        }
+        let c = store.r();
+        let mut st = c.prepare("SELECT uid, eml_path FROM messages WHERE folder_id = (SELECT id FROM folders WHERE account_id = ? AND path = ?) AND body_state = 1 AND eml_path != '' ORDER BY uid")?;
+        let rows = st.query_map(params![account_id, f.path], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (uid, rel) = row?;
+            let p = store.resolve_eml(&rel);
+            let hash = p.as_ref().and_then(|p| sha256_file(p)).unwrap_or_else(|| "（文件缺失）".into());
+            lines.push(format!("  UID {uid}  SHA-256 {hash}"));
+        }
+        lines.push(String::new());
+    }
+    lines.push(if complete {
+        "结论：服务器有的，本地都有。".into()
+    } else {
+        "结论：还有服务器上的信没有拉到本地。可以用「全量拉取」补齐后再对一次。".into()
+    });
+    let dir = store.dir().join("reconcile");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("校验报告-{}-{}.txt", email.replace(['/', ':'], "_"), transfer::stamp(now_ms())));
+    std::fs::write(&path, lines.join("\n"))?;
+    Ok(ReconcileReport { path, email, folders: out, complete })
 }
 
 // ---------------- 定时增量导出 ----------------
@@ -298,9 +449,17 @@ mod tests {
         assert_eq!(slim_preview(&s, 365).unwrap().messages, 1, "seed 的日期是 1970 年");
         let r = slim(&s, 365).unwrap();
         assert_eq!(r.messages, 1);
-        let (state, text): (i64, String) = s.r().query_row("SELECT body_state, text FROM messages WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        let (state, text): (i64, String) = s
+            .r()
+            .query_row("SELECT body_state, COALESCE((SELECT text FROM bodies WHERE message_id = 1), text) FROM messages WHERE id = 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
         assert_eq!(state, 0);
         assert!(text.contains("hello"));
+        let (miss, extra) = uid_diff(&[1, 2, 3], &[2, 3, 9]);
+        assert_eq!(miss, vec![1]);
+        assert_eq!(extra, vec![9]);
         assert!(!s.eml_abs(1, 1).exists());
     }
 }

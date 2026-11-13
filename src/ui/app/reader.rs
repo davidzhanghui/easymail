@@ -308,11 +308,13 @@ impl MailApp {
         let key = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            (id, show_html, remote, t.id, d.html.len(), d.text.len(), dark_mail).hash(&mut h);
+            (id, show_html, remote, t.id, d.html.len(), d.text.len(), dark_mail, self.thread_bodies && d.thread.len() > 1).hash(&mut h);
             h.finish()
         };
         if self.doc.as_ref().map(|x| x.0) != Some(key) {
-            let doc = if show_html {
+            let doc = if self.thread_bodies && d.thread.len() > 1 {
+                thread_page(&self.store, &d, remote, dark_mail)
+            } else if show_html {
                 webview::mail_document(&d.html, remote, dark_mail)
             } else {
                 webview::text_document(&d.text, &hex_css(t.hex_ink), &hex_css(t.hex_paper), &hex_css(t.hex_muted), &hex_css(t.hex_accent))
@@ -532,6 +534,11 @@ impl MailApp {
                 .items_center()
                 .gap(px(2.))
                 .child(div().flex_1().min_w(px(80.)).text_size(px(11.)).text_color(t.muted).child(format!("同一会话 · 第 {} / {} 封", pos + 1, n)))
+                .child(tbtn("th-expand", if self.thread_bodies { "只看这一封" } else { "展开会话正文" }, false).on_click(cx.listener(|a, _, _, cx| {
+                    a.thread_bodies = !a.thread_bodies;
+                    a.doc = None;
+                    cx.notify();
+                })))
                 .child(tbtn("th-prev", "上一封 [", pos == 0).on_click(cx.listener(|a, _, _, cx| a.go_in_thread(-1, cx))))
                 .child(tbtn("th-next", "下一封 ]", pos + 1 >= n).on_click(cx.listener(|a, _, _, cx| a.go_in_thread(1, cx))))
                 .child(tbtn("th-read", "全部已读", !any_unread).on_click(cx.listener(move |a, _, _, cx| a.set_seen(all_ids.clone(), true, cx))))
@@ -697,6 +704,27 @@ fn or_dash(s: &str) -> &str {
 // ───────────────────────── 会话时间线 ─────────────────────────
 
 /// 会话级「归档 / 删除」不动的文件夹：已发送、草稿、垃圾箱、垃圾邮件（删除时）、已归档（归档时）
+/// 同一会话拼成一页：纯文本和简单 HTML 直接放进去，复杂 HTML 留一句提示，仍由时间线点进单独的 iframe。
+fn thread_page(store: &crate::core::db::Store, d: &crate::core::model::Detail, remote: bool, dark: bool) -> String {
+    let mut html = String::from("<div>");
+    for th in &d.thread {
+        let who = webview::escape_html(&th.from.text());
+        html.push_str(&format!("<h3 style=\"font-size:13px;margin:18px 0 6px;font-weight:600\">{who} · {}</h3>", webview::escape_html(&th.folder)));
+        let piece = queries::detail(store, th.id).ok().flatten();
+        match piece {
+            Some(p) if !p.html.is_empty() && webview::html_is_simple(&p.html) => html.push_str(&p.html),
+            Some(p) if !p.html.is_empty() => html.push_str("<p style=\"color:#666\">这封排版较复杂，在下面的时间线上点开单独看。</p>"),
+            Some(p) => {
+                let text = if p.text.trim().is_empty() { th.snippet.clone() } else { p.text };
+                html.push_str(&format!("<p style=\"white-space:pre-wrap\">{}</p>", webview::escape_html(&text)));
+            }
+            None => html.push_str(&format!("<p>{}</p>", webview::escape_html(&th.snippet))),
+        }
+    }
+    html.push_str("</div>");
+    webview::mail_document(&html, remote, dark)
+}
+
 fn thread_actionable(role: &str, archive: bool) -> bool {
     !matches!(role, "sent" | "drafts" | "trash" | "junk") && !(archive && role == "archive")
 }

@@ -34,7 +34,15 @@ pub struct Sidebar {
     store: Store,
     /// 展开的账号（kv `account_open`）。不在这里的账号默认折叠，包括以后新加的账号。
     expanded: HashSet<i64>,
+    focus: FocusHandle,
+    /// 键盘在账号树上的位置
+    kb: Option<usize>,
     _observe: Subscription,
+}
+
+enum Node {
+    Acc(i64),
+    Fol(i64),
 }
 
 /// 渲染一次所需的 `MailApp` 数据
@@ -56,7 +64,7 @@ impl Sidebar {
         let expanded = store.get_kv("account_open").and_then(|s| serde_json::from_str::<Vec<i64>>(&s).ok()).unwrap_or_default().into_iter().collect();
         // MailApp 的任何变化都重绘侧栏（nav、未读数、同步状态、宽度……）
         let _observe = cx.observe(app, |_, _, cx| cx.notify());
-        Sidebar { app: app.downgrade(), store, expanded, _observe }
+        Sidebar { app: app.downgrade(), store, expanded, focus: cx.focus_handle(), kb: None, _observe }
     }
 
     fn toggle_collapsed(&mut self, account: i64, cx: &mut Context<Self>) {
@@ -65,6 +73,73 @@ impl Sidebar {
         }
         let v: Vec<i64> = self.expanded.iter().copied().collect();
         self.store.set_kv("account_open", &serde_json::to_string(&v).unwrap_or_default());
+        cx.notify();
+    }
+
+    fn nodes(&self, snap: &Snapshot) -> Vec<Node> {
+        let mut v = Vec::new();
+        for a in &snap.accounts {
+            let list: Vec<&Folder> = snap.folders.iter().filter(|f| f.account_id == a.id).collect();
+            if a.is_local() && list.is_empty() {
+                continue;
+            }
+            v.push(Node::Acc(a.id));
+            if self.expanded.contains(&a.id) {
+                for f in list {
+                    v.push(Node::Fol(f.id));
+                }
+            }
+        }
+        v
+    }
+
+    fn on_tree_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+        let Some(snap) = self.snapshot(cx) else { return };
+        let nodes = self.nodes(&snap);
+        if nodes.is_empty() {
+            return;
+        }
+        let key = ev.keystroke.key.as_str();
+        if !matches!(key, "up" | "down" | "left" | "right" | "enter") {
+            return;
+        }
+        cx.stop_propagation();
+        let i = self.kb.unwrap_or(0).min(nodes.len() - 1);
+        match key {
+            "up" | "down" => {
+                let n = nodes.len() as i32;
+                let d = if key == "up" { -1 } else { 1 };
+                self.kb = Some((i as i32 + d).rem_euclid(n) as usize);
+            }
+            "left" => match nodes[i] {
+                Node::Fol(fid) => {
+                    if let Some(acc) = snap.folders.iter().find(|f| f.id == fid).map(|f| f.account_id) {
+                        if let Some(ai) = nodes.iter().position(|n| matches!(n, Node::Acc(id) if *id == acc)) {
+                            self.kb = Some(ai);
+                        }
+                    }
+                }
+                Node::Acc(id) => {
+                    self.expanded.remove(&id);
+                    let v: Vec<i64> = self.expanded.iter().copied().collect();
+                    self.store.set_kv("account_open", &serde_json::to_string(&v).unwrap_or_default());
+                }
+            },
+            "right" => match nodes[i] {
+                Node::Acc(id) if !self.expanded.contains(&id) => {
+                    self.expanded.insert(id);
+                    let v: Vec<i64> = self.expanded.iter().copied().collect();
+                    self.store.set_kv("account_open", &serde_json::to_string(&v).unwrap_or_default());
+                }
+                Node::Acc(_) if i + 1 < nodes.len() && matches!(nodes[i + 1], Node::Fol(_)) => self.kb = Some(i + 1),
+                _ => {}
+            },
+            "enter" => match nodes[i] {
+                Node::Acc(id) => self.toggle_collapsed(id, cx),
+                Node::Fol(id) => cx.emit(SidebarEvent::Folder(id)),
+            },
+            _ => {}
+        }
         cx.notify();
     }
 
@@ -168,6 +243,15 @@ impl Render for Sidebar {
             .px(px(12.))
             .pb(px(8.))
             .child(div().text_size(px(11.)).text_color(t.muted).px(px(10.)).mt(px(14.)).mb(px(8.)).child("账  号"));
+        let nodes = self.nodes(&snap);
+        let kb_acc = self.kb.and_then(|i| nodes.get(i)).and_then(|n| match n {
+            Node::Acc(id) => Some(*id),
+            _ => None,
+        });
+        let kb_fol = self.kb.and_then(|i| nodes.get(i)).and_then(|n| match n {
+            Node::Fol(id) => Some(*id),
+            _ => None,
+        });
         let accounts = snap.accounts.clone();
         for a in accounts.iter() {
             let list: Vec<&Folder> = snap.folders.iter().filter(|f| f.account_id == a.id).collect();
@@ -195,6 +279,7 @@ impl Render for Sidebar {
                             .rounded(px(7.))
                             .cursor_pointer()
                             .hover(|s| s.bg(t.row_hover))
+                            .when(kb_acc == Some(aid), |d| d.bg(t.accent_soft))
                             .text_size(px(15.))
                             .font_weight(FontWeight::BOLD)
                             .text_color(t.ink)
@@ -205,11 +290,13 @@ impl Render for Sidebar {
                                 ),
                             )
                             .child(dot(t.named(&a.color), 7.).mr(px(7.)))
-                            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::BOLD).child(if local {
-                                "本地归档".to_string()
-                            } else {
-                                a.email.clone()
-                            }))
+                            .child(
+                                div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::BOLD).child(if local {
+                                    "本地归档".to_string()
+                                } else {
+                                    a.email.clone()
+                                }),
+                            )
                             .on_click(cx.listener(move |sb, _, _, cx| sb.toggle_collapsed(aid, cx))),
                     )
                     .when(!local, |d| {
@@ -263,7 +350,7 @@ impl Render for Sidebar {
                         } else {
                             t.faint
                         })
-                        .when(active, |d| d.bg(t.accent_soft).font_weight(FontWeight::SEMIBOLD))
+                        .when(active || kb_fol == Some(fid), |d| d.bg(t.accent_soft).font_weight(FontWeight::SEMIBOLD))
                         .hover(|s| s.bg(if active { t.accent_soft } else { t.row_hover }))
                         .drag_over::<DragMails>({
                             let (soft, acc) = (theme.accent_soft, theme.accent);
@@ -329,6 +416,9 @@ impl Render for Sidebar {
         let accounts_area = div().id("sidebar-accounts").flex_1().min_h(px(0.)).overflow_y_scroll().child(acc_col);
         div()
             .id("sidebar")
+            .track_focus(&self.focus)
+            .on_mouse_down(MouseButton::Left, cx.listener(|s, _, window, _| window.focus(&s.focus)))
+            .on_key_down(cx.listener(|s, ev: &KeyDownEvent, _, cx| s.on_tree_key(ev, cx)))
             .flex_none()
             .w(px(snap.width))
             .h_full()

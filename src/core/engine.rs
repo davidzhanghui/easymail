@@ -154,6 +154,11 @@ enum Job {
         message_id: String,
         reply: oneshot::Sender<Result<bool>>,
     },
+    /// 只读：文件夹里全部 UID（逐封对账）
+    Uids {
+        path: String,
+        reply: oneshot::Sender<Result<Vec<u32>>>,
+    },
 }
 
 /// 后台重放（同步过程中顺带执行）时跳过刚写入、还没试过的待办：它们的提交者马上会发 Flush 并亲自报告结果，
@@ -167,6 +172,8 @@ const WATCH_FOLDERS_MAX: usize = 3;
 struct SyncJob {
     only_folder: Option<i64>,
     extras: bool,
+    /// 一直回填并预取正文，直到这个账号的文件夹都拉完，或用户暂停
+    pull: bool,
     reply: Vec<oneshot::Sender<Result<usize>>>,
 }
 
@@ -356,6 +363,7 @@ impl Engine {
             }
             *s = true;
         }
+        super::bridge::apply(self.store().clone());
         for a in accounts::list(self.store()).unwrap_or_default() {
             if !a.is_local() && a.sync_enabled {
                 self.ensure_account(a.id, true);
@@ -457,14 +465,14 @@ impl Engine {
     /// 请求同步（不等待）
     pub fn request_sync(&self, id: i64, only_folder: Option<i64>, extras: bool) {
         let (_, s) = self.ensure_account(id, false);
-        let _ = s.send(SyncJob { only_folder, extras, reply: vec![] });
+        let _ = s.send(SyncJob { only_folder, extras, pull: false, reply: vec![] });
     }
 
     /// 请求同步并等待完成，返回新增封数
     pub fn sync_and_wait(&self, id: i64, only_folder: Option<i64>, extras: bool) -> impl Future<Output = Result<usize>> + Send + 'static {
         let (_, s) = self.ensure_account(id, false);
         let (tx, rx) = oneshot::channel();
-        let sent = s.send(SyncJob { only_folder, extras, reply: vec![tx] }).is_ok();
+        let sent = s.send(SyncJob { only_folder, extras, pull: false, reply: vec![tx] }).is_ok();
         async move {
             if !sent {
                 bail!("同步队列已关闭");
@@ -524,6 +532,41 @@ impl Engine {
             v.drain(0..v.len() - WATCH_FOLDERS_MAX);
         }
         store.set_kv(&format!("watch_folders.{account_id}"), &serde_json::to_string(&v).unwrap_or_else(|_| "[]".into()));
+    }
+
+    fn pull_key(id: i64) -> String {
+        format!("pull_pause.{id}")
+    }
+
+    pub fn pull_paused(store: &Store, id: i64) -> bool {
+        store.get_kv(&Self::pull_key(id)).as_deref() == Some("1")
+    }
+
+    pub fn set_pull_pause(&self, id: i64, on: bool) {
+        self.store().set_kv(&Self::pull_key(id), if on { "1" } else { "0" });
+    }
+
+    /// 把这个账号的全部文件夹拉下来：信封回填 + 正文预取，可暂停。
+    /// 不改「是否同步」勾选；虚拟文件夹（所有邮件 / 重要）不重复拉。
+    pub fn request_pull(&self, id: i64) {
+        self.set_pull_pause(id, false);
+        let _ = self.store().w().execute("UPDATE folders SET backfill_done = 0 WHERE account_id = ? AND role NOT IN ('flagged','all')", [id]);
+        let (_, s) = self.ensure_account(id, false);
+        let _ = s.send(SyncJob { only_folder: None, extras: true, pull: true, reply: vec![] });
+        self.toast("开始把这个账号的全部文件夹拉下来。可以在备份面板里暂停。".to_string(), false);
+    }
+
+    /// 服务器上某个文件夹的全部 UID
+    pub fn remote_uids(&self, id: i64, path: String) -> impl Future<Output = Result<Vec<u32>>> + Send + 'static {
+        let (o, _) = self.ensure_account(id, false);
+        let (tx, rx) = oneshot::channel();
+        let sent = o.send(Job::Uids { path, reply: tx }).is_ok();
+        async move {
+            if !sent {
+                bail!("操作队列已关闭");
+            }
+            rx.await.unwrap_or_else(|_| Err(anyhow!("操作被中断")))
+        }
     }
 
     /// 服务器上 `path` 文件夹里有没有 Message-ID 为 `message_id` 的信
@@ -880,9 +923,10 @@ impl Worker {
                             job.only_folder = None;
                         }
                         job.extras |= more.extras;
+                        job.pull |= more.pull;
                         job.reply.extend(more.reply);
                     }
-                    let r = self.sync_account(job.only_folder, job.extras).await;
+                    let r = if job.pull { self.pull_until_done().await } else { self.sync_account(job.only_folder, job.extras, false).await };
                     for tx in job.reply {
                         let _ = tx.send(r.as_ref().map(|n| *n).map_err(|e| anyhow!("{e:#}")));
                     }
@@ -918,6 +962,18 @@ impl Worker {
     async fn handle(&mut self, job: Job) {
         match job {
             Job::Op(op) => self.exec(op).await,
+            Job::Uids { path, reply } => {
+                let r = async {
+                    let c = self.conn().await?;
+                    c.select(&path).await?;
+                    c.uid_search("ALL").await
+                }
+                .await;
+                if r.is_err() {
+                    self.conn = None;
+                }
+                let _ = reply.send(r);
+            }
             Job::Probe { path, message_id, reply } => {
                 let mut r = self.probe(&path, &message_id).await;
                 if r.as_ref().is_err_and(|e| kind_of(e) != ErrorKind::Rejected) {
@@ -1190,7 +1246,39 @@ impl Worker {
 
     // ---------- 同步 ----------
 
-    async fn sync_account(&mut self, only_folder: Option<i64>, extras: bool) -> Result<usize> {
+    async fn pull_until_done(&mut self) -> Result<usize> {
+        let mut added = 0;
+        for _ in 0..10_000 {
+            if Engine::pull_paused(self.store(), self.acc_id) {
+                self.eng.toast("全量拉取已暂停".to_string(), false);
+                return Ok(added);
+            }
+            added += self.sync_account(None, true, true).await?;
+            if !self.pull_remaining() {
+                self.eng.toast("全量拉取完成".to_string(), false);
+                return Ok(added);
+            }
+        }
+        self.eng.toast("全量拉取达到单次上限，点一次「继续拉取」接着拉".to_string(), true);
+        Ok(added)
+    }
+
+    fn pull_remaining(&self) -> bool {
+        self.store()
+            .r()
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM folders WHERE account_id = ?1 AND backfill_done = 0 AND role NOT IN ('flagged','all'))
+                   + (SELECT COUNT(*) FROM messages m JOIN folders f ON f.id = m.folder_id
+                      WHERE f.account_id = ?1 AND m.body_state = 0 AND m.uid > 0 AND f.role NOT IN ('flagged','all'))",
+                [self.acc_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            > 0
+    }
+
+    async fn sync_account(&mut self, only_folder: Option<i64>, extras: bool, pull: bool) -> Result<usize> {
         let id = self.acc_id;
         let Some(acc) = accounts::get(self.store(), id)? else { return Ok(0) };
         if acc.is_local() {
@@ -1198,12 +1286,12 @@ impl Worker {
         }
         self.eng.set_state(id, true, "", "");
         let reused = self.conn.is_some();
-        let mut r = self.sync_inner(&acc, only_folder, extras).await;
+        let mut r = self.sync_inner(&acc, only_folder, extras, pull).await;
         // 复用的旧连接可能早被服务器（163 等）悄悄断开：第一条命令就 Broken pipe。丢掉后用新连接重试一次
         if reused && matches!(&r, Err(e) if kind_of(e) == ErrorKind::Connection) {
             log::info!("[sync] {}: 旧连接已失效，重连后重试：{:#}", acc.email, r.as_ref().err().unwrap());
             self.conn = None;
-            r = self.sync_inner(&acc, only_folder, extras).await;
+            r = self.sync_inner(&acc, only_folder, extras, pull).await;
         }
         let added = r.as_ref().map(|x| x.0).unwrap_or(0);
         match &r {
@@ -1230,12 +1318,12 @@ impl Worker {
 
     /// 返回 (新增封数, 部分文件夹失败时的汇总提示)。
     /// 单个文件夹被服务器拒绝（删了 / 没权限）只记下来、继续同步其余文件夹；连接类错误直接中止（后面的也连不上）。
-    async fn sync_inner(&mut self, acc: &Account, only_folder: Option<i64>, extras: bool) -> Result<(usize, String)> {
+    async fn sync_inner(&mut self, acc: &Account, only_folder: Option<i64>, extras: bool, pull: bool) -> Result<(usize, String)> {
         // 单文件夹同步（IDLE 触发的那种）不做 LIST + 逐夹 STATUS，直接用库里的文件夹信息
         let known = if only_folder.is_some() { folders_of(self.store(), acc.id)? } else { vec![] };
         let mut folders = match only_folder {
             Some(fid) if known.iter().any(|f| f.id == fid) => known,
-            _ => self.sync_folder_list(acc).await?,
+            _ => self.sync_folder_list(acc, pull).await?,
         };
         if let Some(fid) = only_folder {
             folders.retain(|f| f.id == fid);
@@ -1267,12 +1355,12 @@ impl Worker {
             for f in &folders {
                 self.pump_ops().await;
                 self.eng.set_state(acc.id, true, &format!("{} · 正文", f.label()), "");
-                if let Err(e) = self.prefetch(acc, f, &settings).await {
+                if let Err(e) = self.prefetch(acc, f, &settings, pull).await {
                     log::warn!("[prefetch] {}: {e:#}", f.path);
                     self.conn = None;
                 }
             }
-            if settings.backfill {
+            if settings.backfill || pull {
                 for f in &folders {
                     self.pump_ops().await;
                     self.eng.set_state(acc.id, true, &format!("{} · 回填", f.label()), "");
@@ -1289,7 +1377,7 @@ impl Worker {
         Ok((added, warn))
     }
 
-    async fn sync_folder_list(&mut self, acc: &Account) -> Result<Vec<Folder>> {
+    async fn sync_folder_list(&mut self, acc: &Account, pull: bool) -> Result<Vec<Folder>> {
         let remote = self.conn().await?.list_folders().await?;
         let skip = providers::provider(&acc.provider).skip_roles;
         let store = self.store().clone();
@@ -1350,7 +1438,8 @@ impl Worker {
                 store.w().execute("UPDATE folders SET total = ?, unseen = ? WHERE id = ?", params![total, unseen, f.id])?;
             }
         }
-        let mut v: Vec<Folder> = folders_of(&store, acc.id)?.into_iter().filter(|f| f.sync_enabled).collect();
+        let mut v: Vec<Folder> =
+            folders_of(&store, acc.id)?.into_iter().filter(|f| if pull { !matches!(f.role.as_str(), "flagged" | "all") } else { f.sync_enabled }).collect();
         v.sort_by(|a, b| role_rank(&a.role).cmp(&role_rank(&b.role)).then(a.path.cmp(&b.path)));
         Ok(v)
     }
@@ -1509,20 +1598,25 @@ impl Worker {
         Ok(added)
     }
 
-    async fn prefetch(&mut self, acc: &Account, f: &Folder, s: &super::config::Settings) -> Result<()> {
-        if s.prefetch_bodies == 0 || f.role == "trash" || f.role == "junk" {
+    async fn prefetch(&mut self, acc: &Account, f: &Folder, s: &super::config::Settings, deep: bool) -> Result<()> {
+        if !deep && (s.prefetch_bodies == 0 || f.role == "trash" || f.role == "junk") {
             return Ok(());
         }
         let store = self.store().clone();
         let todo: Vec<(i64, u32, i64)> = {
             let c = store.r();
-            let mut st = c.prepare(
+            let mut st = c.prepare(if deep {
+                "SELECT id, uid, size FROM messages WHERE folder_id = ? AND body_state = 0 AND uid > 0 ORDER BY date DESC LIMIT 40"
+            } else {
                 "SELECT id, uid, size FROM (SELECT id, uid, body_state, size, date FROM messages WHERE folder_id = ? ORDER BY date DESC LIMIT ?)
-                 WHERE body_state = 0 AND size <= ? AND uid > 0 ORDER BY date DESC",
-            )?;
-            let v = st
-                .query_map(params![f.id, s.prefetch_bodies, s.max_prefetch_size as i64], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u32, r.get(2)?)))?
-                .collect::<Result<Vec<_>, _>>()?;
+                 WHERE body_state = 0 AND size <= ? AND uid > 0 ORDER BY date DESC"
+            })?;
+            let v = if deep {
+                st.query_map(params![f.id], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u32, r.get(2)?)))?.collect::<Result<Vec<_>, _>>()?
+            } else {
+                st.query_map(params![f.id, s.prefetch_bodies, s.max_prefetch_size as i64], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u32, r.get(2)?)))?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
             v
         };
         if todo.is_empty() {
@@ -1570,7 +1664,8 @@ impl Worker {
         let c = self.conn().await?;
         c.ensure_selected(&f.path).await?;
         let older = c.uid_search(&format!("UID 1:{}", f.oldest_uid - 1)).await?;
-        let older: Vec<u32> = older.into_iter().filter(|u| *u < f.oldest_uid).collect();
+        let mut older: Vec<u32> = older.into_iter().filter(|u| *u < f.oldest_uid).collect();
+        older.sort_unstable();
         if older.is_empty() {
             store.w().execute("UPDATE folders SET backfill_done = 1 WHERE id = ?", [f.id])?;
             return Ok(0);

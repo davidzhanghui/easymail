@@ -30,7 +30,7 @@
 - **富文本写信**：独立的写信窗口（主窗口可以继续翻邮件）、回复 / 全部回复 / 转发、签名、附件、内嵌图片；草稿自动保存并同步到服务器的「草稿」文件夹
 - **十一套配色**：八套浅色 + 三套深色，可跟随系统
 - **导入 / 导出 / 备份**：导入 `.eml` / `.mbox` 到「本地归档」；导出 mbox、CSV、标准 maildir；完整备份（附校验报告，可选密码加密）与应用内一键恢复、定时增量导出、账号间搬家（IMAP 复制，可断点续传）、安全瘦身
-- **命令行与 AI 接入**：`easymail-cli` 可在终端搜索 / 阅读 / 导出本地邮件库，并提供只读的 MCP 服务器供本地 AI 工具使用
+- **命令行与 AI 接入**：`easymail-cli` 可在终端搜索 / 阅读 / 导出本地邮件库，并提供只读的 MCP 与本机 HTTP 接口。默认关闭，在「工具 → 本地接口」里按账号、文件夹打开
 - **代理**：SOCKS5 / HTTP（含认证），可按账号开启；首次启动自动探测本机常见代理端口
 - **连接诊断**：逐步检查代理 → DNS → 端口 → TLS → 登录，定位连不上的原因
 
@@ -90,12 +90,16 @@ jar 不在仓库里，`scripts/fetch-greenmail.sh` 会按固定版本与校验�
 ```bash
 easymail-cli search "from:bob 发票 after:2025-01" --limit 20
 easymail-cli show 1234
+easymail-cli attachments 1234
+easymail-cli attachment 1234 0
 easymail-cli export mbox ~/out.mbox "is:starred"
 easymail-cli backup ~/Backups
 easymail-cli mcp          # 以 stdio 方式运行 MCP 服务器
 ```
 
-在支持 MCP 的 AI 工具里这样配置（工具：`search_mail` / `read_mail` / `list_folders` / `mail_stats`，全部只读，不能发信或删信）：
+读取邮件（含 MCP、本机 HTTP）默认关闭。在 App「工具 → 本地接口」打开总开关，并可按账号、文件夹收窄范围。导出和完整备份不走这个开关。
+
+在支持 MCP 的 AI 工具里这样配置（工具：`search_mail` / `read_mail` / `list_attachments` / `get_attachment` / `list_folders` / `mail_stats`，全部只读，不能发信或删信；正文和附件会标成不可信内容）：
 
 ```json
 {
@@ -108,7 +112,7 @@ easymail-cli mcp          # 以 stdio 方式运行 MCP 服务器
 }
 ```
 
-每次工具调用都会记录到数据目录的 `mcp-audit.log`。注意：接入 MCP 意味着你允许该 AI 工具读取你的邮件内容。
+每次工具调用都会记录到数据目录的 `mcp-audit.log`，在「工具 → 本地接口」里可以查看和清空。同一套只读工具也可以走本机 HTTP（默认关闭，只监听 `127.0.0.1:47321`，需要 Bearer 令牌，并且本地接口总开关也要开着）。注意：打开之后，你就允许被授权的本机程序读取指定范围内的邮件。
 
 ## 数据目录
 

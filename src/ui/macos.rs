@@ -105,19 +105,28 @@ struct Tray {
     _target: Retained<TrayTarget>,
     unread_item: Retained<NSMenuItem>,
     autostart_item: Retained<NSMenuItem>,
+    /// 菜单原文（中文）和对应项，换语言时重写标题，不用重启
+    labels: Vec<(Retained<NSMenuItem>, String)>,
 }
 
 thread_local! {
     static TRAY: RefCell<Option<Tray>> = const { RefCell::new(None) };
 }
 
-fn menu_item(mtm: MainThreadMarker, title: &str, action: Option<objc2::runtime::Sel>, target: &TrayTarget) -> Retained<NSMenuItem> {
+fn menu_item(
+    mtm: MainThreadMarker,
+    title: &str,
+    action: Option<objc2::runtime::Sel>,
+    target: &TrayTarget,
+    labels: &mut Vec<(Retained<NSMenuItem>, String)>,
+) -> Retained<NSMenuItem> {
     let item = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &NSString::from_str(&crate::i18n::tr(title)), action, &NSString::from_str(""))
     };
     if action.is_some() {
         unsafe { item.setTarget(Some(target)) };
     }
+    labels.push((item.clone(), title.to_string()));
     item
 }
 
@@ -131,18 +140,19 @@ pub fn install_tray() {
     let menu = NSMenu::new(mtm);
     menu.setAutoenablesItems(false);
     let name = crate::core::config::APP_NAME;
-    menu.addItem(&menu_item(mtm, &format!("打开{name}"), Some(sel!(show:)), &target));
-    menu.addItem(&menu_item(mtm, "写新邮件", Some(sel!(compose:)), &target));
-    menu.addItem(&menu_item(mtm, "立即同步全部账号", Some(sel!(sync:)), &target));
-    let unread_item = menu_item(mtm, "未读邮件：0", None, &target);
+    let mut labels = Vec::new();
+    menu.addItem(&menu_item(mtm, &format!("打开{name}"), Some(sel!(show:)), &target, &mut labels));
+    menu.addItem(&menu_item(mtm, "写新邮件", Some(sel!(compose:)), &target, &mut labels));
+    menu.addItem(&menu_item(mtm, "立即同步全部账号", Some(sel!(sync:)), &target, &mut labels));
+    let unread_item = menu_item(mtm, "未读邮件：0", None, &target, &mut labels);
     unread_item.setEnabled(false);
     menu.addItem(&unread_item);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
-    menu.addItem(&menu_item(mtm, "在访达中显示数据目录", Some(sel!(reveal:)), &target));
-    let autostart_item = menu_item(mtm, "开机自启", Some(sel!(autostart:)), &target);
+    menu.addItem(&menu_item(mtm, "在访达中显示数据目录", Some(sel!(reveal:)), &target, &mut labels));
+    let autostart_item = menu_item(mtm, "开机自启", Some(sel!(autostart:)), &target, &mut labels);
     menu.addItem(&autostart_item);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
-    menu.addItem(&menu_item(mtm, &format!("退出{name}"), Some(sel!(quit:)), &target));
+    menu.addItem(&menu_item(mtm, &format!("退出{name}"), Some(sel!(quit:)), &target, &mut labels));
 
     let item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
     if let Some(button) = item.button(mtm) {
@@ -155,7 +165,7 @@ pub fn install_tray() {
         }
     }
     item.setMenu(Some(&menu));
-    TRAY.with(|t| *t.borrow_mut() = Some(Tray { item, _target: target, unread_item, autostart_item }));
+    TRAY.with(|t| *t.borrow_mut() = Some(Tray { item, _target: target, unread_item, autostart_item, labels }));
     refresh_tray();
 }
 
@@ -165,6 +175,12 @@ fn refresh_tray() {
     TRAY.with(|t| {
         if let Some(t) = t.borrow().as_ref() {
             t.unread_item.setTitle(&NSString::from_str(&crate::i18n::tr(&format!("未读邮件：{n}"))));
+            for (item, zh) in &t.labels {
+                if zh.starts_with("未读邮件") {
+                    continue;
+                }
+                item.setTitle(&NSString::from_str(&crate::i18n::tr(zh)));
+            }
             t.autostart_item.setState(if auto { NSControlStateValueOn } else { NSControlStateValueOff });
             if let Some(mtm) = MainThreadMarker::new() {
                 if let Some(b) = t.item.button(mtm) {
@@ -174,6 +190,11 @@ fn refresh_tray() {
             }
         }
     });
+}
+
+/// 语言切换后重写托盘菜单，不用重启
+pub fn relabel_tray() {
+    refresh_tray();
 }
 
 /// 收件箱未读数 → Dock 角标 + 托盘

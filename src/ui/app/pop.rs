@@ -116,6 +116,7 @@ impl MailApp {
                     (Cmd::ToggleThreads, "list", if self.threads { "改为逐封显示" } else { "按会话合并显示" }),
                     (Cmd::Prefs, "gear", "设置"),
                     (Cmd::CheckUpdate, "refresh", "检查更新"),
+                    (Cmd::LocalApi, "shield", "本地接口"),
                 ]
                 .into_iter()
                 .enumerate()

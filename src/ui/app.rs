@@ -211,6 +211,8 @@ pub struct MailApp {
     extras: Option<(i64, usize, Rc<reader::Extras>)>,
     /// 列表按会话合并（kv `threads`）
     pub threads: bool,
+    /// 阅读区把同一会话的纯文本 / 简单 HTML 拼成一页
+    pub thread_bodies: bool,
     /// load_meta 的请求代号：只应用最新一次后台查询的结果
     meta_gen: u64,
     pub detail_state: DetailState,
@@ -395,6 +397,7 @@ impl MailApp {
             remote_cache: None,
             extras: None,
             threads,
+            thread_bodies: false,
             meta_gen: 0,
             detail_state: DetailState::Idle,
             remote_ok: HashSet::new(),

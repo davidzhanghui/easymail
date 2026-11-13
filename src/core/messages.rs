@@ -165,8 +165,7 @@ pub fn sweep_orphan_eml(store: &Store) -> Result<usize> {
 
 /// 原文落盘 + 解析结果入库 + 全文索引。
 ///
-/// HTML 不再写进库（显示时从 .eml 现解析，见 `queries::detail`）：同一封正文以前在磁盘上存了 .eml、text、html、
-/// 两份索引共四五份，html 往往是其中最大的一份。text 仍然保留：全文索引回填、摘要、回复引用都要用。
+/// HTML 不再写进库（显示时从 .eml 现解析，见 `queries::detail`）。纯文本写进 `bodies`，不留在 `messages` 宽行里。
 pub fn store_body(store: &Store, msg_id: i64, raw: &[u8]) -> Result<Parsed> {
     let (acc_id, subject, from_name, from_addr): (i64, String, String, String) =
         store.r().query_row("SELECT account_id, subject, from_name, from_addr FROM messages WHERE id = ?", [msg_id], |r| {
@@ -189,12 +188,12 @@ pub fn store_body(store: &Store, msg_id: i64, raw: &[u8]) -> Result<Parsed> {
     let (hosts, pixels) = parse::remote_trackers(&parsed.html);
     let trackers = if hosts.is_empty() { String::new() } else { format!("{pixels}|{}", hosts.join(",")) };
     let c = store.w();
+    c.execute("INSERT INTO bodies(message_id, text) VALUES(?, ?) ON CONFLICT(message_id) DO UPDATE SET text = excluded.text", params![msg_id, parsed.text])?;
     c.execute(
-        "UPDATE messages SET body_state = 1, text = ?, html = '', att_json = ?, snippet = ?, eml_path = ?, has_att = ?, to_json = ?, cc_json = ?, trackers = ?,
+        "UPDATE messages SET body_state = 1, text = '', html = '', att_json = ?, snippet = ?, eml_path = ?, has_att = ?, to_json = ?, cc_json = ?, trackers = ?,
            unsub = CASE WHEN unsub = '' THEN ? ELSE unsub END, unsub_post = MAX(unsub_post, ?),
            auth_res = CASE WHEN auth_res = '' THEN ? ELSE auth_res END WHERE id = ?",
         params![
-            parsed.text,
             serde_json::to_string(&parsed.atts)?,
             parsed.snippet,
             Store::eml_rel(acc_id, msg_id),

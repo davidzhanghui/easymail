@@ -76,6 +76,8 @@ pub enum Panel {
         busy: bool,
         error: Option<String>,
     },
+    /// MCP / 本机 HTTP：总开关、授权、审计日志
+    LocalApi,
 }
 
 /// 「发现新版本」面板的进度
@@ -135,6 +137,7 @@ pub enum Cmd {
     CheckUpdate,
     Undo,
     ToggleThreads,
+    LocalApi,
 }
 
 pub fn commands() -> Vec<(Cmd, &'static str, &'static str)> {
@@ -160,6 +163,7 @@ pub fn commands() -> Vec<(Cmd, &'static str, &'static str)> {
         (Cmd::Restore, "从备份恢复…（目录或 .embak 加密备份）", "restore huifu beifen"),
         (Cmd::Slim, "安全瘦身（清理旧的本地正文缓存）", "slim shoushen"),
         (Cmd::CheckUpdate, "检查更新", "update gengxin"),
+        (Cmd::LocalApi, "本地接口（MCP / 本机 HTTP，默认关闭）", "mcp http api"),
     ];
     for vw in VIEWS {
         v.push((Cmd::Nav(vw), view_label(vw), vw.key()));
@@ -216,10 +220,58 @@ impl MailApp {
             Cmd::CheckUpdate => self.check_update(true, cx),
             Cmd::Undo => self.undo(cx),
             Cmd::ToggleThreads => self.toggle_threads(cx),
+            Cmd::LocalApi => self.open_local_api(cx),
         }
         if !matches!(self.modal, Some(Modal::Panel(_)) | Some(Modal::Accounts(_)) | Some(Modal::Import(_))) {
             window.focus(&self.focus);
         }
+    }
+
+    fn active_account(&self) -> Option<crate::core::model::Account> {
+        let id = match self.nav {
+            Nav::Folder(fid) => self.folders.iter().find(|f| f.id == fid).map(|f| f.account_id),
+            _ => None,
+        };
+        let id = id.or_else(|| self.accounts.iter().find(|a| !a.is_local()).map(|a| a.id))?;
+        self.accounts.iter().find(|a| a.id == id).cloned()
+    }
+
+    fn reconcile_active(&mut self, cx: &mut Context<Self>) {
+        let Some(acc) = self.active_account().filter(|a| !a.is_local()) else {
+            self.toast("没有可对账的邮箱账号", true, cx);
+            return;
+        };
+        let folder = match self.nav {
+            Nav::Folder(fid) if self.folders.iter().any(|f| f.id == fid && f.account_id == acc.id) => Some(fid),
+            _ => None,
+        };
+        let eng = self.eng.clone();
+        let id = acc.id;
+        self.toast("正在和服务器逐封对账…", false, cx);
+        self.run(async move { crate::core::archive::reconcile(eng, id, folder).await }, cx, |a, r, cx| match r {
+            Ok(rep) => {
+                a.toast(format!("{}。报告：{}", if rep.complete { "服务器有的，本地都有" } else { "还有信没拉到本地" }, rep.path.display()), !rep.complete, cx)
+            }
+            Err(e) => a.toast(format!("对账失败：{e:#}"), true, cx),
+        });
+    }
+
+    fn pull_active(&mut self, cx: &mut Context<Self>) {
+        let Some(acc) = self.active_account().filter(|a| !a.is_local()) else {
+            self.toast("没有可拉取的邮箱账号", true, cx);
+            return;
+        };
+        self.eng.request_pull(acc.id);
+    }
+
+    fn pause_pull(&mut self, cx: &mut Context<Self>) {
+        let Some(acc) = self.active_account() else { return };
+        self.eng.set_pull_pause(acc.id, true);
+        self.toast("全量拉取会在当前这一步结束后暂停", false, cx);
+    }
+
+    fn open_local_api(&mut self, cx: &mut Context<Self>) {
+        self.open_panel(Panel::LocalApi, cx);
     }
 
     pub fn toggle_threads(&mut self, cx: &mut Context<Self>) {
@@ -908,8 +960,9 @@ impl MailApp {
                     *progress = None;
                     *result = Some(match r {
                         Ok(r) => format!(
-                            "复制 {} 封，之前已复制 {} 封，失败 {} 封{}",
+                            "复制 {} 封，跳过已存在 {} 封，之前已复制 {} 封，失败 {} 封{}",
                             r.copied,
+                            r.duplicates,
                             r.skipped,
                             r.failed,
                             if r.errors.is_empty() { String::new() } else { format!("：{}", r.errors.join("；")) }
@@ -1205,11 +1258,19 @@ impl MailApp {
                                                 .and_then(|id| self.folders.iter().find(|f| f.id == id))
                                                 .and_then(|f| {
                                                     self.accounts.iter().find(|a| a.id == f.account_id).map(|a| {
-                                                        if a.is_local() { "本地归档".to_string() } else { a.email.clone() }
+                                                        if a.is_local() {
+                                                            "本地归档".to_string()
+                                                        } else {
+                                                            a.email.clone()
+                                                        }
                                                     })
                                                 })
                                                 .unwrap_or_default();
-                                            if mail.is_empty() { format!("「{name}」") } else { format!("「{mail} / {name}」") }
+                                            if mail.is_empty() {
+                                                format!("「{name}」")
+                                            } else {
+                                                format!("「{mail} / {name}」")
+                                            }
                                         } else {
                                             String::new()
                                         }
@@ -1272,11 +1333,7 @@ impl MailApp {
                 } else if action_key == "move" && target.is_none() {
                     format!("找到{field_name}里包含「{needle}」的新信后，还要在下面点一个文件夹。")
                 } else if action_key == "move" {
-                    format!(
-                        "以后：{field_name}包含「{needle}」的新信（仅 {}）会移到「{}」。",
-                        mailbox.as_deref().unwrap_or("这个邮箱"),
-                        folder_name(target)
-                    )
+                    format!("以后：{field_name}包含「{needle}」的新信（仅 {}）会移到「{}」。", mailbox.as_deref().unwrap_or("这个邮箱"), folder_name(target))
                 } else {
                     let verb = match action_key {
                         "read" => "标为已读，仍留在收件箱",
@@ -1345,28 +1402,29 @@ impl MailApp {
                             }
                         }));
                 }
-                let rules_wrap = div().relative().h(px(160.)).flex_none().mx(px(14.)).rounded(px(8.)).border_1().border_color(t.border_soft).child(rules_box).child(
-                    canvas(
-                        |bounds, _, _| bounds,
-                        move |bounds, _, window, _| {
-                            let max = scroll.max_offset().height;
-                            if max <= px(0.5) || bounds.size.height <= px(24.) {
-                                return;
-                            }
-                            let view = bounds.size.height;
-                            let thumb_h = (view * (view / (view + max))).max(px(24.)).min(view);
-                            let top = bounds.top() + (view - thumb_h) * ((-scroll.offset().y).clamp(px(0.), max) / max);
-                            window.paint_quad(
-                                fill(Bounds::new(point(bounds.right() - px(6.), top), size(px(4.), thumb_h)), thumb.opacity(0.55)).corner_radii(px(2.)),
-                            );
-                        },
-                    )
-                    .absolute()
-                    .top_0()
-                    .right_0()
-                    .bottom_0()
-                    .w(px(10.)),
-                );
+                let rules_wrap =
+                    div().relative().h(px(160.)).flex_none().mx(px(14.)).rounded(px(8.)).border_1().border_color(t.border_soft).child(rules_box).child(
+                        canvas(
+                            |bounds, _, _| bounds,
+                            move |bounds, _, window, _| {
+                                let max = scroll.max_offset().height;
+                                if max <= px(0.5) || bounds.size.height <= px(24.) {
+                                    return;
+                                }
+                                let view = bounds.size.height;
+                                let thumb_h = (view * (view / (view + max))).max(px(24.)).min(view);
+                                let top = bounds.top() + (view - thumb_h) * ((-scroll.offset().y).clamp(px(0.), max) / max);
+                                window.paint_quad(
+                                    fill(Bounds::new(point(bounds.right() - px(6.), top), size(px(4.), thumb_h)), thumb.opacity(0.55)).corner_radii(px(2.)),
+                                );
+                            },
+                        )
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .bottom_0()
+                        .w(px(10.)),
+                    );
                 let column = div()
                     .flex()
                     .flex_col()
@@ -1384,14 +1442,7 @@ impl MailApp {
                     )
                     .child(rules_wrap)
                     .child(form);
-                let preview_bar = div()
-                    .flex_none()
-                    .px(px(22.))
-                    .py(px(8.))
-                    .bg(t.accent_soft)
-                    .text_size(px(12.5))
-                    .text_color(t.ink)
-                    .child(preview);
+                let preview_bar = div().flex_none().px(px(22.)).py(px(8.)).bg(t.accent_soft).text_size(px(12.5)).text_color(t.ink).child(preview);
                 let footer = modal_footer(t).child(div().flex_1()).child(button("rule-add", t, Kind::Primary, Some("plus"), "添加规则", false).on_click(
                     cx.listener(|a, _, _, cx| {
                         let Some(Modal::Panel(Panel::Rules { field, action, target, value, .. })) = &a.modal else { return };
@@ -1729,22 +1780,8 @@ impl MailApp {
             Panel::Contacts { rows, q } => {
                 let focused = q.read(cx).is_focused(window);
                 // 搜索框在滚动区外面，列表单独滚动，输入时不会被顶走。
-                let search = div()
-                    .flex_none()
-                    .px(px(22.))
-                    .pt(px(12.))
-                    .pb(px(8.))
-                    .child(field_box(t, focused).child(div().flex_1().child(q.clone())));
-                let mut list = div()
-                    .id("ct-list")
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.))
-                    .px(px(22.))
-                    .pt(px(4.))
-                    .pb(px(14.))
-                    .max_h(px(460.))
-                    .overflow_y_scroll();
+                let search = div().flex_none().px(px(22.)).pt(px(12.)).pb(px(8.)).child(field_box(t, focused).child(div().flex_1().child(q.clone())));
+                let mut list = div().id("ct-list").flex().flex_col().gap(px(6.)).px(px(22.)).pt(px(4.)).pb(px(14.)).max_h(px(460.)).overflow_y_scroll();
                 if rows.is_empty() {
                     list = list.child(
                         div()
@@ -1916,6 +1953,19 @@ impl MailApp {
                     button("bk-go", t, Kind::Primary, Some("download"), if enc { "选择位置并加密备份" } else { "选择位置并备份" }, false)
                         .on_click(cx.listener(|a, _, w, cx| a.start_backup(w, cx))),
                 );
+                let who = self.active_account().map(|a| a.email.clone()).unwrap_or_else(|| "当前账号".into());
+                b = b.child(div().text_size(px(12.)).text_color(t.ink_2).child(format!("归档：{who}"))).child(
+                    div()
+                        .flex()
+                        .gap(px(8.))
+                        .child(
+                            button("bk-recon", t, Kind::Secondary, None, "与服务器逐封对账", false).on_click(cx.listener(|a, _, _, cx| a.reconcile_active(cx))),
+                        )
+                        .child(
+                            button("bk-pull", t, Kind::Secondary, None, "把这个账号全部拉下来", false).on_click(cx.listener(|a, _, _, cx| a.pull_active(cx))),
+                        )
+                        .child(button("bk-pause", t, Kind::Ghost, None, "暂停拉取", false).on_click(cx.listener(|a, _, _, cx| a.pause_pull(cx)))),
+                );
                 modal_shell(t, 560., "完整备份", "附校验报告，可选密码加密", close).child(b).child(footer).into_any_element()
             }
             Panel::Restore { source, pw, busy, error } => {
@@ -2046,8 +2096,7 @@ impl MailApp {
                                     let thumb_h = (view * (view / (view + max))).max(px(24.)).min(view);
                                     let top = bounds.top() + (view - thumb_h) * ((-scroll.offset().y).clamp(px(0.), max) / max);
                                     window.paint_quad(
-                                        fill(Bounds::new(point(bounds.right() - px(7.), top), size(px(4.), thumb_h)), thumb.opacity(0.55))
-                                            .corner_radii(px(2.)),
+                                        fill(Bounds::new(point(bounds.right() - px(7.), top), size(px(4.), thumb_h)), thumb.opacity(0.55)).corner_radii(px(2.)),
                                     );
                                 },
                             )
@@ -2063,6 +2112,106 @@ impl MailApp {
                     .child(div().flex_1())
                     .child(button("tp-add", t, Kind::Primary, Some("plus"), "添加模板", false).on_click(cx.listener(|a, _, w, cx| a.add_template(w, cx))));
                 modal_shell(t, 620., "回复模板", format!("{} 个", list.len()), close).h(px(shell_h)).child(b).child(footer).into_any_element()
+            }
+            Panel::LocalApi => {
+                use crate::core::{bridge, mcp};
+                let on = mcp::enabled(&self.store);
+                let http = bridge::enabled(&self.store);
+                let (accs, folders) = mcp::acl(&self.store);
+                let lines = mcp::audit_tail(&self.store, 200);
+                let mut b = body
+                    .child(
+                        div().text_size(px(12.)).text_color(t.ink_2).child("只读。不能发信、不能删信。正文和附件返回给外部程序时会标成不可信内容。默认关闭。"),
+                    )
+                    .child(
+                        div().flex().gap(px(8.)).child(
+                            button("mcp-on", t, if on { Kind::Primary } else { Kind::Secondary }, None, if on { "MCP 已打开" } else { "打开 MCP" }, false)
+                                .on_click(cx.listener(|a, _, _, cx| {
+                                    crate::core::mcp::set_enabled(&a.store, !crate::core::mcp::enabled(&a.store));
+                                    crate::core::bridge::apply(a.store.clone());
+                                    a.open_local_api(cx);
+                                })),
+                        ),
+                    );
+                let mut row = div().flex().flex_wrap().gap(px(6.));
+                for a in self.accounts.clone() {
+                    let id = a.id;
+                    let sel = accs.is_empty() || accs.contains(&id);
+                    row = row.child(chip(SharedString::from(format!("mcp-a-{id}")), t, a.email.clone(), sel).on_click(cx.listener(move |app, _, _, cx| {
+                        let (mut accs, folders) = crate::core::mcp::acl(&app.store);
+                        if accs.is_empty() {
+                            accs = app.accounts.iter().map(|a| a.id).filter(|x| *x != id).collect();
+                        } else if let Some(i) = accs.iter().position(|x| *x == id) {
+                            accs.remove(i);
+                        } else {
+                            accs.push(id);
+                        }
+                        crate::core::mcp::set_acl(&app.store, &accs, &folders);
+                        app.open_local_api(cx);
+                    })));
+                }
+                b = b.child(div().text_size(px(11.5)).text_color(t.muted).child("授权账号（全亮 = 全部账号）")).child(row);
+                let mut frow = div().flex().flex_wrap().gap(px(6.));
+                for f in self.folders.iter().filter(|f| accs.is_empty() || accs.contains(&f.account_id)).take(40) {
+                    let id = f.id;
+                    let sel = folders.is_empty() || folders.contains(&id);
+                    frow = frow.child(chip(SharedString::from(format!("mcp-f-{id}")), t, f.label(), sel).on_click(cx.listener(move |app, _, _, cx| {
+                        let (accs, mut folders) = crate::core::mcp::acl(&app.store);
+                        if folders.is_empty() {
+                            folders = app.folders.iter().map(|f| f.id).filter(|x| *x != id).collect();
+                        } else if let Some(i) = folders.iter().position(|x| *x == id) {
+                            folders.remove(i);
+                        } else {
+                            folders.push(id);
+                        }
+                        crate::core::mcp::set_acl(&app.store, &accs, &folders);
+                        app.open_local_api(cx);
+                    })));
+                }
+                b = b.child(div().text_size(px(11.5)).text_color(t.muted).child("授权文件夹（全亮 = 已授权账号下的全部文件夹）")).child(frow);
+                b = b.child(
+                    div().flex().gap(px(8.)).items_center().child(
+                        button(
+                            "http-on",
+                            t,
+                            if http { Kind::Primary } else { Kind::Secondary },
+                            None,
+                            if http { "本机 HTTP 已打开" } else { "打开本机 HTTP" },
+                            false,
+                        )
+                        .on_click(cx.listener(|a, _, _, cx| {
+                            let next = !crate::core::bridge::enabled(&a.store);
+                            if next {
+                                crate::core::mcp::set_enabled(&a.store, true);
+                            }
+                            crate::core::bridge::set_enabled(&a.store, next);
+                            crate::core::bridge::apply(a.store.clone());
+                            a.open_local_api(cx);
+                        })),
+                    ),
+                );
+                if http {
+                    b = b.child(div().text_size(px(11.5)).text_color(t.ink_2).child(format!(
+                        "POST http://127.0.0.1:{}/tool    Bearer {}",
+                        crate::core::bridge::PORT,
+                        crate::core::bridge::token(&self.store)
+                    )));
+                }
+                let mut log = div().id("mcp-log").flex().flex_col().gap(px(2.)).max_h(px(220.)).overflow_y_scroll();
+                if lines.is_empty() {
+                    log = log.child(div().text_size(px(12.)).text_color(t.muted).child("还没有调用记录"));
+                }
+                for (i, line) in lines.iter().take(200).enumerate() {
+                    log = log.child(div().id(("mcp-line", i)).text_size(px(11.)).text_color(t.ink_2).child(line.clone()));
+                }
+                b = b.child(div().text_size(px(11.5)).text_color(t.muted).child("最近调用")).child(log);
+                let footer = modal_footer(t).child(div().flex_1()).child(button("mcp-clear", t, Kind::Ghost, None, "清空记录", false).on_click(cx.listener(
+                    |a, _, _, cx| {
+                        crate::core::mcp::clear_audit(&a.store);
+                        a.open_local_api(cx);
+                    },
+                )));
+                modal_shell(t, 640., "本地接口", "MCP 与本机 HTTP，默认关闭", close).child(b).child(footer).into_any_element()
             }
         }
     }

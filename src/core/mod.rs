@@ -1,6 +1,7 @@
 pub mod accounts;
 pub mod archive;
 pub mod backup_pack;
+pub mod bridge;
 pub mod calendar;
 pub mod config;
 pub mod contacts;

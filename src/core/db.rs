@@ -278,6 +278,95 @@ pub const MIGRATIONS: &[&str] = &[
     // 18：发件箱防重发。uncertain = 1 表示上一次尝试可能已经被服务器收下（进程在发送中退出、
     //     或 DATA 写完后等回应时断线），重发前先去「已发送」按 Message-ID 查一遍
     "ALTER TABLE outbox ADD COLUMN uncertain INTEGER NOT NULL DEFAULT 0;",
+    // 19：正文从 messages 宽行拆出去。text 进 bodies，messages.text 清空；读的时候优先 bodies，
+    //     老语句直接写 messages.text 的测试数据仍然读得到。html 继续不入库（从 .eml 现解析）。
+    "CREATE TABLE IF NOT EXISTS bodies (
+       message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+       text       TEXT NOT NULL DEFAULT ''
+     );
+     INSERT OR IGNORE INTO bodies(message_id, text)
+       SELECT id, text FROM messages WHERE text IS NOT NULL AND text != '';
+     UPDATE messages SET text = '' WHERE text IS NOT NULL AND text != '';",
+    // 20：会话汇总。全部邮件的会话首屏不再对 messages 做窗口函数。
+    //     只统计不在垃圾箱 / 垃圾邮件里的信。之后的增删改由触发器维护。
+    "CREATE TABLE IF NOT EXISTS thread_heads (
+       account_id  INTEGER NOT NULL,
+       thread      TEXT NOT NULL,
+       latest_id   INTEGER NOT NULL,
+       latest_date INTEGER NOT NULL,
+       n           INTEGER NOT NULL,
+       subject     TEXT NOT NULL DEFAULT '',
+       from_name   TEXT NOT NULL DEFAULT '',
+       from_addr   TEXT NOT NULL DEFAULT '',
+       snippet     TEXT NOT NULL DEFAULT '',
+       unseen      INTEGER NOT NULL DEFAULT 0,
+       PRIMARY KEY (account_id, thread)
+     );
+     CREATE INDEX IF NOT EXISTS idx_thread_heads_date ON thread_heads(latest_date DESC, latest_id DESC);
+     INSERT INTO thread_heads(account_id, thread, latest_id, latest_date, n, subject, from_name, from_addr, snippet, unseen)
+     SELECT m.account_id, m.thread, m.id, m.date,
+       (SELECT COUNT(*) FROM messages x JOIN folders xf ON xf.id = x.folder_id
+         WHERE x.account_id = m.account_id AND x.thread = m.thread AND xf.role NOT IN ('trash','junk')),
+       m.subject, m.from_name, m.from_addr, m.snippet,
+       (SELECT COUNT(*) FROM messages x JOIN folders xf ON xf.id = x.folder_id
+         WHERE x.account_id = m.account_id AND x.thread = m.thread AND x.seen = 0 AND xf.role NOT IN ('trash','junk'))
+     FROM messages m JOIN folders f ON f.id = m.folder_id
+     WHERE m.thread != '' AND f.role NOT IN ('trash','junk')
+       AND m.id = (
+         SELECT m2.id FROM messages m2 JOIN folders f2 ON f2.id = m2.folder_id
+         WHERE m2.account_id = m.account_id AND m2.thread = m.thread AND f2.role NOT IN ('trash','junk')
+         ORDER BY m2.date DESC, m2.id DESC LIMIT 1
+       );
+     CREATE TRIGGER IF NOT EXISTS th_ai AFTER INSERT ON messages WHEN NEW.thread != '' BEGIN
+       DELETE FROM thread_heads WHERE account_id = NEW.account_id AND thread = NEW.thread;
+       INSERT INTO thread_heads(account_id, thread, latest_id, latest_date, n, subject, from_name, from_addr, snippet, unseen)
+       SELECT m.account_id, m.thread, m.id, m.date,
+         (SELECT COUNT(*) FROM messages x JOIN folders xf ON xf.id = x.folder_id
+           WHERE x.account_id = m.account_id AND x.thread = m.thread AND xf.role NOT IN ('trash','junk')),
+         m.subject, m.from_name, m.from_addr, m.snippet,
+         (SELECT COUNT(*) FROM messages x JOIN folders xf ON xf.id = x.folder_id
+           WHERE x.account_id = m.account_id AND x.thread = m.thread AND x.seen = 0 AND xf.role NOT IN ('trash','junk'))
+       FROM messages m JOIN folders f ON f.id = m.folder_id
+       WHERE m.account_id = NEW.account_id AND m.thread = NEW.thread AND f.role NOT IN ('trash','junk')
+       ORDER BY m.date DESC, m.id DESC LIMIT 1;
+     END;
+     CREATE TRIGGER IF NOT EXISTS th_ad AFTER DELETE ON messages WHEN OLD.thread != '' BEGIN
+       DELETE FROM thread_heads WHERE account_id = OLD.account_id AND thread = OLD.thread;
+       INSERT INTO thread_heads(account_id, thread, latest_id, latest_date, n, subject, from_name, from_addr, snippet, unseen)
+       SELECT m.account_id, m.thread, m.id, m.date,
+         (SELECT COUNT(*) FROM messages x JOIN folders xf ON xf.id = x.folder_id
+           WHERE x.account_id = m.account_id AND x.thread = m.thread AND xf.role NOT IN ('trash','junk')),
+         m.subject, m.from_name, m.from_addr, m.snippet,
+         (SELECT COUNT(*) FROM messages x JOIN folders xf ON xf.id = x.folder_id
+           WHERE x.account_id = m.account_id AND x.thread = m.thread AND x.seen = 0 AND xf.role NOT IN ('trash','junk'))
+       FROM messages m JOIN folders f ON f.id = m.folder_id
+       WHERE m.account_id = OLD.account_id AND m.thread = OLD.thread AND f.role NOT IN ('trash','junk')
+       ORDER BY m.date DESC, m.id DESC LIMIT 1;
+     END;
+     CREATE TRIGGER IF NOT EXISTS th_au AFTER UPDATE OF thread, date, seen, subject, from_name, from_addr, snippet, folder_id ON messages BEGIN
+       DELETE FROM thread_heads WHERE account_id = OLD.account_id AND thread = OLD.thread;
+       INSERT INTO thread_heads(account_id, thread, latest_id, latest_date, n, subject, from_name, from_addr, snippet, unseen)
+       SELECT m.account_id, m.thread, m.id, m.date,
+         (SELECT COUNT(*) FROM messages x JOIN folders xf ON xf.id = x.folder_id
+           WHERE x.account_id = m.account_id AND x.thread = m.thread AND xf.role NOT IN ('trash','junk')),
+         m.subject, m.from_name, m.from_addr, m.snippet,
+         (SELECT COUNT(*) FROM messages x JOIN folders xf ON xf.id = x.folder_id
+           WHERE x.account_id = m.account_id AND x.thread = m.thread AND x.seen = 0 AND xf.role NOT IN ('trash','junk'))
+       FROM messages m JOIN folders f ON f.id = m.folder_id
+       WHERE OLD.thread != '' AND m.account_id = OLD.account_id AND m.thread = OLD.thread AND f.role NOT IN ('trash','junk')
+       ORDER BY m.date DESC, m.id DESC LIMIT 1;
+       DELETE FROM thread_heads WHERE NEW.thread != OLD.thread AND account_id = NEW.account_id AND thread = NEW.thread;
+       INSERT INTO thread_heads(account_id, thread, latest_id, latest_date, n, subject, from_name, from_addr, snippet, unseen)
+       SELECT m.account_id, m.thread, m.id, m.date,
+         (SELECT COUNT(*) FROM messages x JOIN folders xf ON xf.id = x.folder_id
+           WHERE x.account_id = m.account_id AND x.thread = m.thread AND xf.role NOT IN ('trash','junk')),
+         m.subject, m.from_name, m.from_addr, m.snippet,
+         (SELECT COUNT(*) FROM messages x JOIN folders xf ON xf.id = x.folder_id
+           WHERE x.account_id = m.account_id AND x.thread = m.thread AND x.seen = 0 AND xf.role NOT IN ('trash','junk'))
+       FROM messages m JOIN folders f ON f.id = m.folder_id
+       WHERE NEW.thread != '' AND NEW.thread != OLD.thread AND m.account_id = NEW.account_id AND m.thread = NEW.thread AND f.role NOT IN ('trash','junk')
+       ORDER BY m.date DESC, m.id DESC LIMIT 1;
+     END;",
 ];
 
 /// 二元组索引是否已覆盖全部老数据（没补完时两字词搜索退回 LIKE，结果不缺）
@@ -525,7 +614,7 @@ impl Store {
         let rows: Vec<(i64, String, String, String, String, String)> = {
             let c = self.r();
             let mut st = c.prepare(
-                "SELECT id, subject, from_name || ' ' || from_addr, to_json, cc_json, COALESCE(text, '') FROM messages WHERE id > ? ORDER BY id LIMIT ?",
+                "SELECT id, subject, from_name || ' ' || from_addr, to_json, cc_json, COALESCE((SELECT text FROM bodies WHERE message_id = messages.id), COALESCE(text, '')) FROM messages WHERE id > ? ORDER BY id LIMIT ?",
             )?;
             let v = st
                 .query_map(params![cursor, batch as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?

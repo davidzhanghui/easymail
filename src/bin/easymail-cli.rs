@@ -4,6 +4,8 @@
 //!   easymail-cli show <id>
 //!   easymail-cli stats
 //!   easymail-cli folders
+//!   easymail-cli attachments <id>
+//!   easymail-cli attachment <id> <序号>
 //!   easymail-cli export <mbox|csv> <输出文件> [搜索条件]
 //!   easymail-cli backup <目标目录>
 //!   easymail-cli mcp            # stdio MCP 服务器（只读，调用记录写入 mcp-audit.log）
@@ -15,7 +17,7 @@ use serde_json::json;
 
 fn usage() -> ! {
     eprintln!(
-        "EasyMail 命令行 {}\n\n用法：\n  easymail-cli search <条件> [--limit N]\n  easymail-cli show <id>\n  easymail-cli stats\n  easymail-cli folders\n  easymail-cli export <mbox|csv> <输出文件> [条件]\n  easymail-cli backup <目标目录>\n  easymail-cli mcp\n",
+        "EasyMail 命令行 {}\n\n用法：\n  easymail-cli search <条件> [--limit N]\n  easymail-cli show <id>\n  easymail-cli attachments <id>\n  easymail-cli attachment <id> <序号>\n  easymail-cli stats\n  easymail-cli folders\n  easymail-cli export <mbox|csv> <输出文件> [条件]\n  easymail-cli backup <目标目录>\n  easymail-cli mcp\n\n读取邮件需要先在 App「工具 → 本地接口」里打开（默认关闭）。\n",
         config::VERSION
     );
     std::process::exit(2)
@@ -41,6 +43,15 @@ fn main() {
             "show" => {
                 let id: i64 = args.get(1).and_then(|v| v.parse().ok()).unwrap_or_else(|| usage());
                 println!("{}", mcp::call_tool(&store, "read_mail", &json!({"id": id}))?);
+            }
+            "attachments" => {
+                let id: i64 = args.get(1).and_then(|v| v.parse().ok()).unwrap_or_else(|| usage());
+                println!("{}", mcp::call_tool(&store, "list_attachments", &json!({"id": id}))?);
+            }
+            "attachment" => {
+                let id: i64 = args.get(1).and_then(|v| v.parse().ok()).unwrap_or_else(|| usage());
+                let index: i64 = args.get(2).and_then(|v| v.parse().ok()).unwrap_or_else(|| usage());
+                println!("{}", mcp::call_tool(&store, "get_attachment", &json!({"id": id, "index": index}))?);
             }
             "stats" => println!("{}", mcp::call_tool(&store, "mail_stats", &json!({}))?),
             "folders" => println!("{}", mcp::call_tool(&store, "list_folders", &json!({}))?),

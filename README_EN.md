@@ -32,7 +32,7 @@
 - **Rich-text composer in its own window** — reply / reply all / forward, signatures, attachments, inline images; drafts autosave and sync to the server's Drafts folder
 - **Ten color themes** — seven light, three dark, or follow the system
 - **Import / export / backup** — import `.eml` / `.mbox` into a local archive; export mbox, CSV or a standard maildir; verified full backups, scheduled incremental export, copy folders between accounts (resumable IMAP copy), and safe cache slimming
-- **CLI & AI access** — `easymail-cli` searches / reads / exports your local library from the terminal and serves a read-only MCP server for local AI tools
+- **CLI & AI access** — `easymail-cli` searches, reads, and exports the local library, and can serve a read-only MCP server plus a localhost HTTP bridge. Off by default; turn it on under Tools → Local access, optionally limited to chosen accounts and folders
 - **Proxies** — SOCKS5 / HTTP (with auth), per account; common local proxy ports are detected on first launch
 - **Connection diagnostics** — step-by-step check of proxy → DNS → port → TLS → login
 
@@ -91,12 +91,16 @@ The packaged `迷你邮件.app/Contents/MacOS/easymail-cli` reads the local libr
 ```bash
 easymail-cli search "from:bob invoice after:2025-01" --limit 20
 easymail-cli show 1234
+easymail-cli attachments 1234
+easymail-cli attachment 1234 0
 easymail-cli export mbox ~/out.mbox "is:starred"
 easymail-cli backup ~/Backups
 easymail-cli mcp          # run the MCP server over stdio
 ```
 
-MCP client configuration (tools: `search_mail` / `read_mail` / `list_folders` / `mail_stats`, all read-only — it cannot send or delete mail):
+Reading mail (including MCP and the local HTTP bridge) is off by default. Turn on the master switch under Tools → Local access, and optionally limit it to specific accounts and folders. Export and full backup do not use this switch.
+
+MCP client configuration (tools: `search_mail` / `read_mail` / `list_attachments` / `get_attachment` / `list_folders` / `mail_stats`, all read-only — it cannot send or delete mail; message bodies and attachments are marked as untrusted content):
 
 ```json
 {
@@ -109,7 +113,7 @@ MCP client configuration (tools: `search_mail` / `read_mail` / `list_folders` / 
 }
 ```
 
-Every tool call is logged to `mcp-audit.log` in the data directory. Connecting an AI tool over MCP means you allow it to read your mail.
+Every tool call is logged to `mcp-audit.log`. The same screen can show the last 200 lines and clear them. The same read-only tools are also available over HTTP on `127.0.0.1:47321` (off by default, Bearer token required, and the master switch must be on). Turning this on allows authorized local programs to read mail in the selected scope.
 
 ## Data directory
 

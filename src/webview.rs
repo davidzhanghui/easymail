@@ -282,6 +282,15 @@ pub(crate) async fn eval_of(v: Retained<WKWebView>, cx: &AsyncApp, js: &str) -> 
 
 // ───────────────────────────── 文档 ─────────────────────────────
 
+/// 简单 HTML 可以和纯文本拼进同一页。带表格、图片、样式表或很长的，仍单独用 iframe。
+pub fn html_is_simple(html: &str) -> bool {
+    if html.is_empty() || html.len() > 12_000 {
+        return false;
+    }
+    let l = html.to_ascii_lowercase();
+    !l.contains("<table") && !l.contains("<img") && !l.contains("<style") && !l.contains("<script") && !l.contains("background")
+}
+
 /// HTML 邮件文档：CSP 默认拦截远程资源（追踪像素），用户点「显示图片」后放行。
 pub fn mail_document(html: &str, allow_remote: bool, dark: bool) -> String {
     let csp = if allow_remote {
@@ -292,9 +301,12 @@ pub fn mail_document(html: &str, allow_remote: bool, dark: bool) -> String {
     };
     let cleaned = strip_dangerous(html);
     // 深色：整页反色（白底变深灰、黑字变浅），再把图片 / 视频等反回来；hue-rotate 让反色后颜色不至于完全失真
+    // 整页反色后，再把图片反回来。表格的白底在反色前抹掉，避免白底单元格在深色里变成一块死白或字被反没。
+    // 透明 PNG：图片单独隔离，半透明像素不再和已经反色的底叠一次。
     let dark_css = if dark {
         "html { background: #fff; filter: invert(.92) hue-rotate(180deg); }\
-img, video, picture, canvas, svg, [style*=\"background-image\"] { filter: invert(1) hue-rotate(180deg); }"
+table, tr, td, th { background-color: transparent !important; background-image: none !important; }\
+img, video, picture, canvas, svg, [style*=\"background-image\"] { filter: invert(1) hue-rotate(180deg); background-color: transparent !important; isolation: isolate; }"
     } else {
         ""
     };
@@ -469,7 +481,9 @@ mod tests {
             assert!(d.contains("<p>after</p>"));
         }
         let d2 = mail_document("<p>hi</p>", true, false);
-        assert!(mail_document("<p>hi</p>", false, true).contains("invert("), "深色模式要带反色样式");
+        let dark = mail_document("<p>hi</p><table><td style=\"background:#fff\">x</td></table>", false, true);
+        assert!(dark.contains("invert("), "深色模式要带反色样式");
+        assert!(dark.contains("background-color: transparent") && dark.contains("isolation: isolate"));
         assert!(!d2.contains("invert("));
         assert!(d2.contains("img-src * data: blob:"));
     }

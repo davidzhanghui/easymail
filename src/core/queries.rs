@@ -200,9 +200,9 @@ fn term_cond(t: &str, w: &mut Vec<String>, a: &mut Vec<Value>, negate: bool) {
     } else if n == 2 && t.chars().all(super::db::is_cjk) {
         // 二元组索引还在后台补建：暂时扫正文，补完后自动走索引
         w.push(format!(
-            "{not}(m.subject LIKE ? ESCAPE '\\' OR m.from_name LIKE ? ESCAPE '\\' OR m.from_addr LIKE ? ESCAPE '\\' OR m.to_json LIKE ? ESCAPE '\\' OR m.text LIKE ? ESCAPE '\\')"
+            "{not}(m.subject LIKE ? ESCAPE '\\' OR m.from_name LIKE ? ESCAPE '\\' OR m.from_addr LIKE ? ESCAPE '\\' OR m.to_json LIKE ? ESCAPE '\\' OR m.text LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM bodies b WHERE b.message_id = m.id AND b.text LIKE ? ESCAPE '\\'))"
         ));
-        for _ in 0..5 {
+        for _ in 0..6 {
             a.push(like(t).into());
         }
     } else {
@@ -369,7 +369,61 @@ fn list_item(r: &Row) -> rusqlite::Result<ListItem> {
 
 /// 取一页。`count`：是否重新计数（翻下一页时不必，`total` 返回 -1 表示沿用上次的值）。
 /// 计数最多数到 [`COUNT_CAP`]，超过时返回 `COUNT_CAP + 1`，界面显示「10000+」。
+/// 全部邮件、没有搜索 / 文件夹 / 筛选、也没有「稍后处理」时，会话首屏走汇总表。
+fn fast_threads(store: &Store, p: &ListParams) -> bool {
+    p.threads
+        && p.view == View::All
+        && p.q.trim().is_empty()
+        && p.folder_id.is_none()
+        && p.ids.is_empty()
+        && p.filter == Filter::All
+        && store.r().query_row("SELECT COUNT(*) FROM snoozed", [], |r| r.get::<_, i64>(0)).unwrap_or(1) == 0
+}
+
+fn list_threads_fast(store: &Store, p: &ListParams, cursor: Option<(i64, i64)>, limit: usize, count: bool) -> Result<Page> {
+    let limit = limit.clamp(1, 500);
+    let mut w = vec!["f.role NOT IN ('trash','junk')".to_string()];
+    let mut args: Vec<Value> = Vec::new();
+    if let Some(acc) = p.account_id {
+        w.push("h.account_id = ?".into());
+        args.push(acc.into());
+    }
+    let where_sql = w.join(" AND ");
+    let c = store.r();
+    let total: i64 = if count {
+        c.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM (SELECT 1 FROM thread_heads h JOIN messages m ON m.id = h.latest_id JOIN folders f ON f.id = m.folder_id WHERE {where_sql} LIMIT {})",
+                COUNT_CAP + 1
+            ),
+            params_from_iter(args.iter()),
+            |r| r.get(0),
+        )?
+    } else {
+        -1
+    };
+    let mut page = args;
+    let mut cur = String::new();
+    if let Some((d, id)) = cursor {
+        cur = " AND (m.date < ? OR (m.date = ? AND m.id < ?))".into();
+        page.extend([Value::from(d), Value::from(d), Value::from(id)]);
+    }
+    page.push(Value::from(limit as i64 + 1));
+    let sql = format!(
+        "SELECT {LIST_COLS}, h.n FROM thread_heads h JOIN messages m ON m.id = h.latest_id JOIN folders f ON f.id = m.folder_id JOIN accounts a ON a.id = m.account_id WHERE {where_sql}{cur} ORDER BY m.date DESC, m.id DESC LIMIT ?"
+    );
+    let mut st = c.prepare(&sql)?;
+    let mut items = st.query_map(params_from_iter(page.iter()), list_item)?.collect::<Result<Vec<_>, _>>()?;
+    let more = items.len() > limit;
+    items.truncate(limit);
+    let next = if more { items.last().map(|l| (l.date, l.id)) } else { None };
+    Ok(Page { total, items, next })
+}
+
 pub fn list_page(store: &Store, p: &ListParams, cursor: Option<(i64, i64)>, limit: usize, count: bool) -> Result<Page> {
+    if fast_threads(store, p) {
+        return list_threads_fast(store, p, cursor, limit, count);
+    }
     let (w, args) = build_filter(p);
     let limit = limit.clamp(1, 500);
     let cond = if w.is_empty() { "1 = 1".into() } else { w.join(" AND ") };
@@ -477,7 +531,7 @@ pub fn detail(store: &Store, id: i64) -> Result<Option<Detail>> {
     let row = c
         .query_row(
             "SELECT m.id, m.account_id, m.folder_id, m.subject, m.message_id, m.from_name, m.from_addr, m.reply_to, m.to_json, m.cc_json, m.date,
-               m.seen, m.flagged, m.answered, COALESCE(m.text, ''), COALESCE(m.html, ''), m.att_json, a.email, a.name, a.color, a.provider, f.role, f.name,
+               m.seen, m.flagged, m.answered, COALESCE((SELECT text FROM bodies WHERE message_id = m.id), COALESCE(m.text, '')), COALESCE(m.html, ''), m.att_json, a.email, a.name, a.color, a.provider, f.role, f.name,
                m.thread, m.eml_path, m.body_state, m.unsub, m.unsub_post, m.auth_res, m.trackers, (SELECT until FROM snoozed WHERE message_id = m.id)
              FROM messages m JOIN folders f ON f.id = m.folder_id JOIN accounts a ON a.id = m.account_id WHERE m.id = ?",
             [id],

@@ -382,6 +382,59 @@ pub struct Colors {
     pub dark: bool,
 }
 
+const EDITOR_ZH: &[&str] = &[
+    "无衬线",
+    "衬线",
+    "等宽",
+    "苹方",
+    "宋体",
+    "楷体",
+    "小",
+    "正常",
+    "大",
+    "超大",
+    "字体",
+    "字号",
+    "粗体 ⌘B",
+    "斜体 ⌘I",
+    "下划线 ⌘U",
+    "删除线",
+    "文字颜色 / 背景色",
+    "对齐方式",
+    "编号列表",
+    "项目符号列表",
+    "减少缩进",
+    "增加缩进",
+    "引用",
+    "清除格式",
+    "格式选项",
+    "插入链接 ⌘K",
+    "插入表情",
+    "插入图片",
+    "左对齐",
+    "居中",
+    "右对齐",
+    "两端对齐",
+    "文字颜色",
+    "背景色",
+    "显示的文字",
+    "链接地址",
+    "移除链接",
+    "取消",
+    "应用",
+    "粘贴的图片",
+];
+
+fn editor_dict() -> String {
+    let mut m = serde_json::Map::new();
+    for s in EDITOR_ZH {
+        if let std::borrow::Cow::Owned(en) = crate::i18n::tr(s) {
+            m.insert((*s).to_string(), serde_json::Value::String(en));
+        }
+    }
+    serde_json::Value::Object(m).to_string()
+}
+
 /// 生成编辑器文档。`body_html` 必须是已经可信的 HTML（草稿正文，或纯文本经转义转换而来）。
 pub fn document(body_html: &str, quote: Option<(&str, bool)>, placeholder: &str, c: &Colors) -> String {
     let vars = format!(
@@ -408,7 +461,8 @@ pub fn document(body_html: &str, quote: Option<(&str, bool)>, placeholder: &str,
         .replace("__NONCE__", &nonce)
         .replace("__VARS__", &vars)
         .replace("__THEME__", if c.dark { "dark" } else { "light" })
-        .replace("__PLACEHOLDER__", &crate::webview::escape_html(placeholder))
+        .replace("__I18N__", &editor_dict())
+        .replace("__PLACEHOLDER__", &crate::webview::escape_html(&crate::i18n::tr(placeholder)))
         .replace("__QUOTE__", &quote_block)
         // 正文放最后替换：它可能含有上面的占位串
         .replace("__BODY__", body_html)

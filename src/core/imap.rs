@@ -49,6 +49,9 @@ pub struct Caps {
     pub list_status: bool,
     /// RFC 5465：IDLE 时同时监听多个文件夹
     pub notify: bool,
+    /// 服务器宣称 QRESYNC（RFC 5162）。async-imap 0.12 没有这条扩展的命令与解析，
+    /// 增量标记继续用 CONDSTORE 的 CHANGEDSINCE，这里只记下来，不发 QRESYNC。
+    pub qresync: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -145,10 +148,11 @@ impl Imap {
         };
         let mut client = async_imap::Client::new(conn);
         if !greeted {
+            // 0.11 起 read_response 返回 Result<Option<_>>
             match tokio::time::timeout(Duration::from_secs(30), client.read_response()).await {
-                Ok(Some(Ok(_))) => {}
-                Ok(Some(Err(e))) => bail!("读取服务器问候失败：{e}"),
-                Ok(None) => bail!("服务器关闭了连接"),
+                Ok(Ok(Some(_))) => {}
+                Ok(Ok(None)) => bail!("服务器关闭了连接"),
+                Ok(Err(e)) => bail!("读取服务器问候失败：{e}"),
                 Err(_) => bail!("服务器 30 秒没有问候，可能被墙或端口不对"),
             }
         }
@@ -182,7 +186,11 @@ impl Imap {
             id: caps.has_str("ID"),
             list_status: caps.has_str("LIST-STATUS"),
             notify: caps.has_str("NOTIFY"),
+            qresync: caps.has_str("QRESYNC"),
         };
+        if me.caps.qresync {
+            log::info!("[imap] {} 支持 QRESYNC；当前库没有这条扩展，增量标记仍用 CONDSTORE", acc.email);
+        }
         if me.caps.id {
             let ver = super::config::VERSION;
             let _ = timed("ID", me.ss().id([("name", Some("EasyMail")), ("version", Some(ver)), ("vendor", Some("easymail"))])).await;
