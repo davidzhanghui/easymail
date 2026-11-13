@@ -60,7 +60,7 @@ ring = "0.17"
 # 加密备份打包成单个文件
 tar = "0.4"
 # 发票归集：从 PDF 提取文字（纯 Rust）
-pdf-extract = "0.9"
+pdf-extract = "0.12"
 # 发票文字里的康熙部首（⼦⽇⽅…）归一成正常汉字
 unicode-normalization = "0.1"
 
