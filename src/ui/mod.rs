@@ -10,6 +10,7 @@ pub mod import;
 pub mod line_input;
 pub mod macos;
 pub mod palettes;
+pub mod reader_window;
 pub mod text_area;
 pub mod theme;
 pub mod widgets;

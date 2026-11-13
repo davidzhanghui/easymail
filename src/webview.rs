@@ -13,6 +13,7 @@ use block2::RcBlock;
 use gpui::{AsyncApp, Bounds, Pixels, Window};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::DefinedClass;
 use objc2::{define_class, msg_send, AnyThread, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSView};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -26,16 +27,26 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 /// 用户在正文里点了的链接（导航代理写入，界面每帧取走）。
-static CLICKED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static CLICKED: Mutex<Vec<(u64, String)>> = Mutex::new(Vec::new());
+
+/// 主窗口的窗口编号；其他窗口（单独打开的阅读窗口）用 GPUI 的窗口 id
+pub const PRIMARY: u64 = 0;
 
 pub fn take_clicked() -> Vec<String> {
-    std::mem::take(&mut *CLICKED.lock().unwrap())
+    take_clicked_in(PRIMARY)
+}
+
+pub fn take_clicked_in(wid: u64) -> Vec<String> {
+    let mut all = CLICKED.lock().unwrap();
+    let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut *all).into_iter().partition(|(w, _)| *w == wid);
+    *all = rest;
+    mine.into_iter().map(|(_, u)| u).collect()
 }
 
 define_class!(
     #[unsafe(super = NSObject)]
     #[thread_kind = MainThreadOnly]
-    #[ivars = ()]
+    #[ivars = u64]
     struct NavDelegate;
 
     unsafe impl NSObjectProtocol for NavDelegate {}
@@ -51,7 +62,7 @@ define_class!(
             let internal = url.is_empty() || url.starts_with("about:") || url.starts_with("data:");
             if ty == WKNavigationType::LinkActivated {
                 if !url.is_empty() && !url.starts_with("about:") {
-                    CLICKED.lock().unwrap().push(url);
+                    CLICKED.lock().unwrap().push((*self.ivars(), url));
                     crate::ui::macos::notify_ui();
                 }
                 handler.call((WKNavigationActionPolicy::Cancel,));
@@ -65,8 +76,8 @@ define_class!(
 );
 
 impl NavDelegate {
-    fn new(mtm: MainThreadMarker) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(());
+    fn new(mtm: MainThreadMarker, wid: u64) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(wid);
         unsafe { msg_send![super(this), init] }
     }
 }
@@ -81,14 +92,14 @@ struct Live {
 }
 
 thread_local! {
-    static LIVE: RefCell<Option<Live>> = const { RefCell::new(None) };
+    static LIVE: RefCell<std::collections::HashMap<u64, Live>> = RefCell::new(std::collections::HashMap::new());
 }
 
 pub(crate) fn mtm() -> MainThreadMarker {
     MainThreadMarker::new().expect("WebKit 只能在主线程使用")
 }
 
-fn make_view() -> (Retained<WKWebView>, Retained<NavDelegate>) {
+fn make_view(wid: u64) -> (Retained<WKWebView>, Retained<NavDelegate>) {
     let mtm = mtm();
     unsafe {
         let config = WKWebViewConfiguration::new(mtm);
@@ -99,7 +110,7 @@ fn make_view() -> (Retained<WKWebView>, Retained<NavDelegate>) {
         prefs.setJavaScriptCanOpenWindowsAutomatically(false);
         let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(400., 300.));
         let view = WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), frame, &config);
-        let delegate = NavDelegate::new(mtm);
+        let delegate = NavDelegate::new(mtm, wid);
         view.setNavigationDelegate(Some(ProtocolObject::from_ref(&*delegate)));
         // 背景交给文档自己画（HTML 邮件白底，纯文本跟随主题）
         view.setValue_forKey(Some(&NSNumber::new_bool(false)), &NSString::from_str("drawsBackground"));
@@ -116,6 +127,10 @@ pub(crate) fn parent_view(window: &Window) -> Option<&NSView> {
 
 /// 显示（或更新位置）。`key` 变化表示换了一封信 / 换了显示模式，需要重新加载文档。
 pub fn show(window: &Window, bounds: Bounds<Pixels>, key: u64, document: &str) {
+    show_in(PRIMARY, window, bounds, key, document)
+}
+
+pub fn show_in(wid: u64, window: &Window, bounds: Bounds<Pixels>, key: u64, document: &str) {
     let Some(parent) = parent_view(window) else { return };
     let h = parent.bounds().size.height;
     let frame = CGRect::new(
@@ -124,14 +139,13 @@ pub fn show(window: &Window, bounds: Bounds<Pixels>, key: u64, document: &str) {
     );
     LIVE.with(|l| {
         let mut l = l.borrow_mut();
-        if l.is_none() {
-            let (view, delegate) = make_view();
+        let live = l.entry(wid).or_insert_with(|| {
+            let (view, delegate) = make_view(wid);
             parent.addSubview(&view);
             let parent = unsafe { Retained::retain(parent as *const NSView as *mut NSView) }.expect("ns_view");
             view.setFrame(frame);
-            *l = Some(Live { key: !key, view, _delegate: delegate, parent, frozen: false, frame });
-        }
-        let live = l.as_mut().unwrap();
+            Live { key: !key, view, _delegate: delegate, parent, frozen: false, frame }
+        });
         if live.key != key {
             live.key = key;
             unsafe { live.view.loadHTMLString_baseURL(&NSString::from_str(document), None) };
@@ -146,8 +160,12 @@ pub fn show(window: &Window, bounds: Bounds<Pixels>, key: u64, document: &str) {
 
 /// 收起（没有选中邮件 / 切到别的界面）。
 pub fn hide() {
+    hide_in(PRIMARY)
+}
+
+pub fn hide_in(wid: u64) {
     LIVE.with(|l| {
-        if let Some(live) = l.borrow_mut().take() {
+        if let Some(live) = l.borrow_mut().remove(&wid) {
             live.view.removeFromSuperview();
             // WebView 可能拿着键盘焦点：交还给 GPUI 的内容视图，快捷键才继续有效
             if let Some(win) = live.parent.window() {
@@ -158,21 +176,25 @@ pub fn hide() {
 }
 
 pub fn is_live() -> bool {
-    LIVE.with(|l| l.borrow().is_some())
+    LIVE.with(|l| l.borrow().contains_key(&PRIMARY))
+}
+
+pub fn is_live_in(wid: u64) -> bool {
+    LIVE.with(|l| l.borrow().contains_key(&wid))
 }
 
 pub fn is_frozen() -> bool {
-    LIVE.with(|l| l.borrow().as_ref().is_some_and(|x| x.frozen))
+    LIVE.with(|l| l.borrow().get(&PRIMARY).is_some_and(|x| x.frozen))
 }
 
 pub fn current_key() -> Option<u64> {
-    LIVE.with(|l| l.borrow().as_ref().map(|x| x.key))
+    LIVE.with(|l| l.borrow().get(&PRIMARY).map(|x| x.key))
 }
 
 /// 冻结：隐藏原生视图（由调用方在原位置画快照）。
 pub fn set_frozen(frozen: bool) {
     LIVE.with(|l| {
-        if let Some(live) = l.borrow_mut().as_mut() {
+        if let Some(live) = l.borrow_mut().get_mut(&PRIMARY) {
             if live.frozen != frozen {
                 live.frozen = frozen;
                 live.view.setHidden(frozen);
@@ -187,7 +209,7 @@ pub fn set_frozen(frozen: bool) {
 }
 
 fn view() -> Option<Retained<WKWebView>> {
-    LIVE.with(|l| l.borrow().as_ref().map(|x| x.view.clone()))
+    LIVE.with(|l| l.borrow().get(&PRIMARY).map(|x| x.view.clone()))
 }
 
 pub fn is_loading() -> bool {

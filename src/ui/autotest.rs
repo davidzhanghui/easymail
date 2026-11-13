@@ -657,6 +657,25 @@ async fn e2e(t: &mut T, cx: &mut AsyncApp) {
         });
     }
 
+    // 多窗口：在新窗口打开邮件，有自己的 WebView；关闭后释放
+    {
+        let id = t.read(cx, |a, _| a.items.first().map(|m| m.id)).flatten().unwrap_or(0);
+        let before = cx.update(|cx| cx.windows().len()).unwrap_or(0);
+        t.with(cx, |a, _, cx| a.open_in_window(id, cx));
+        t.wait(cx, 800).await;
+        let wins = cx.update(|cx| cx.windows()).unwrap_or_default();
+        t.check("多窗口：新窗口已打开", wins.len() == before + 1);
+        let wid = wins.last().map(|w| w.window_id().as_u64()).unwrap_or(0);
+        t.check("多窗口：新窗口有自己的 WebView", crate::webview::is_live_in(wid));
+        t.check("多窗口：不影响主窗口状态", !wins.is_empty());
+        if let Some(w) = wins.last() {
+            let _ = cx.update(|cx| w.update(cx, |_, window, _| window.remove_window()));
+        }
+        t.wait(cx, 300).await;
+        crate::webview::hide_in(wid);
+        t.check("多窗口：关闭后窗口数恢复", cx.update(|cx| cx.windows().len()).unwrap_or(0) == before);
+    }
+
     // 联系人：列表有往来的人；新建时 Tab 在各栏间切换；保存后能搜到
     t.with(cx, |a, w, cx| a.open_contacts("", w, cx));
     t.wait(cx, 300).await;

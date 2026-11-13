@@ -458,6 +458,11 @@ impl MailApp {
                     return;
                 }
                 a.anchor = Some(id);
+                // 双击：在独立窗口里打开
+                if ev.click_count() >= 2 {
+                    a.open_in_window(id, cx);
+                    return;
+                }
                 a.reader_collapsed = false;
                 a.save_layout();
                 a.open_message(id, cx)

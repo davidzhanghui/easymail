@@ -42,6 +42,12 @@ impl MailApp {
                         a.open_message(id, cx);
                     })));
                 }
+                if n == 1 {
+                    p = p.child(menu_row("rc-window", t, Some("panel-right"), "在新窗口打开", false).on_click(cx.listener(move |a, _, _, cx| {
+                        a.pop = None;
+                        a.open_in_window(id, cx);
+                    })));
+                }
                 p = p
                     .child(
                         menu_row("rc-seen", t, Some(if any_unread { "read" } else { "unread" }), if any_unread { "标为已读" } else { "标为未读" }, false)

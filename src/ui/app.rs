@@ -979,6 +979,13 @@ impl MailApp {
         cx.notify();
     }
 
+    /// 在独立窗口里打开邮件（并排对照）
+    pub fn open_in_window(&mut self, id: i64, cx: &mut Context<Self>) {
+        if let Err(e) = crate::ui::reader_window::open(&self.store, id, cx) {
+            self.toast(format!("{e:#}"), true, cx);
+        }
+    }
+
     /// 回复日历邀请
     pub fn rsvp(&mut self, id: i64, r: calendar::Rsvp, cx: &mut Context<Self>) {
         self.toast("正在发送回复…", false, cx);
