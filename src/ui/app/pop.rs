@@ -119,6 +119,7 @@ impl MailApp {
                     (Cmd::LocalApi, "shield", "本地接口"),
                 ]
                 .into_iter()
+                .filter(|(c, _, _)| *c != Cmd::CheckUpdate || crate::core::tools::kv_flag(&self.store, "update_button", true))
                 .enumerate()
                 {
                     p = p.child(menu_row(("tool", i), t, Some(ic), label, false).on_click(cx.listener(move |a, _, w, cx| {

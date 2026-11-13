@@ -14,6 +14,7 @@ use ring::signature;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// 更新签名公钥（Ed25519，32 字节，十六进制）。对应私钥只在发布流水线的 Secrets 里（UPDATE_SIGNING_KEY）
 pub const UPDATE_PUBKEY_HEX: &str = "9bffd6f4a51eee7c1918010313bdc4e9ddcdb63db3b1b6cd26893f2b2786d9a8";
@@ -201,6 +202,40 @@ else
 fi
 ${OPEN_CMD:-open} "$app"
 "#;
+
+static DOWNLOAD_BUSY: AtomicBool = AtomicBool::new(false);
+
+/// 同时只允许一个下载。已经在下载时返回 false
+pub fn begin_download() -> bool {
+    DOWNLOAD_BUSY.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+}
+
+pub fn end_download() {
+    DOWNLOAD_BUSY.store(false, Ordering::SeqCst);
+}
+
+/// 已下载、已校验、放在安装目录旁边、等重启替换的新版本
+pub fn pending_version() -> Option<String> {
+    let app = installed_app()?;
+    let name = app.file_name()?.to_str()?;
+    let staged = app.with_file_name(format!(".{name}.update"));
+    if !staged.join("Contents/Info.plist").is_file() {
+        return None;
+    }
+    let version = plist_value(&staged, "CFBundleShortVersionString").ok()?;
+    tools::newer(&version, super::config::VERSION).then_some(version)
+}
+
+/// 退出当前进程之前调用：用旁边那个已校验的新版本替换并重新打开
+pub fn restart_pending() -> Result<()> {
+    let app = installed_app().ok_or_else(|| anyhow!("当前不是从 .app 运行的，无法自动更新"))?;
+    let name = app.file_name().and_then(|n| n.to_str()).ok_or_else(|| anyhow!("安装路径不正确"))?;
+    let staged = app.with_file_name(format!(".{name}.update"));
+    if pending_version().is_none() {
+        bail!("没有已下载的更新");
+    }
+    relaunch(&Staged { app, staged })
+}
 
 /// 启动脱离本进程的替换脚本；调用后应立即退出应用
 pub fn relaunch(s: &Staged) -> Result<()> {

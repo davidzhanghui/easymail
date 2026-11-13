@@ -101,6 +101,26 @@ pub fn badge(t: &Theme, text: impl Into<SharedString>, strong: bool) -> Div {
         .child(crate::i18n::tr_shared(text.into()))
 }
 
+/// 开关：36×22 的轨道，圆点靠右为开、靠左为关。
+pub fn toggle(t: &Theme, on: bool) -> Div {
+    div()
+        .flex_none()
+        .w(px(36.))
+        .h(px(22.))
+        .rounded(px(11.))
+        .px(px(2.))
+        .flex()
+        .items_center()
+        .bg(if on { t.accent } else { t.line_2 })
+        .when(on, |d| d.justify_end())
+        .child(div().size(px(16.)).rounded_full().bg(gpui::rgb(0xffffff)).border_1().border_color(hsla(0., 0., 0., 0.16)).shadow(vec![BoxShadow {
+            color: hsla(0., 0., 0., 0.22),
+            offset: point(px(0.), px(1.)),
+            blur_radius: px(2.),
+            spread_radius: px(0.),
+        }]))
+}
+
 pub fn checkbox(id: impl Into<ElementId>, t: &Theme, checked: bool) -> Stateful<Div> {
     div().id(id).size(px(14.)).flex_none().flex().items_center().justify_center().rounded(px(3.5)).border_1().cursor_pointer().map(|d| {
         if checked {

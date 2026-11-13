@@ -221,6 +221,10 @@ impl MailApp {
                 crate::ui::macos::relabel_tray();
             }
             AccountsEvent::Toast(m, e) => this.toast(m.clone(), *e, cx),
+            AccountsEvent::Restart => match crate::core::updater::restart_pending() {
+                Ok(()) => cx.quit(),
+                Err(e) => this.toast(format!("无法重启更新：{e:#}"), true, cx),
+            },
         });
         self.modal_sub = Some(sub);
         self.pop = None;

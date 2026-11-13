@@ -10,7 +10,12 @@ use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
 pub const RELEASES_API: &str = "https://api.github.com/repos/davidzhanghui/easymail/releases/latest";
+pub const RELEASES_LIST: &str = "https://api.github.com/repos/davidzhanghui/easymail/releases?per_page=20";
 pub const RELEASES_PAGE: &str = "https://github.com/davidzhanghui/easymail/releases/latest";
+pub const SITE: &str = "https://davidzhanghui.github.io/easymail/";
+pub const REPO: &str = "https://github.com/davidzhanghui/easymail";
+pub const LICENSE_URL: &str = "https://github.com/davidzhanghui/easymail/blob/main/LICENSE";
+pub const FEEDBACK_URL: &str = "https://github.com/davidzhanghui/easymail/issues/new";
 
 // ---------------- 代理探测 ----------------
 
@@ -70,19 +75,13 @@ pub fn newer(remote: &str, local: &str) -> bool {
     ver(remote) > ver(local)
 }
 
-/// 查 GitHub Releases 的最新版本；比当前新就返回。只读一个公开 JSON，不上传任何信息（不带设备标识）
-pub async fn check_update(proxy: Option<&Proxy>) -> Result<Option<Release>> {
-    let r = http::request("GET", RELEASES_API, &[("Accept", "application/vnd.github+json")], None, proxy).await?;
-    if !r.ok() {
-        bail!("GitHub 返回 HTTP {}", r.status);
-    }
-    let j = r.json()?;
+fn release_from_json(j: &serde_json::Value) -> Option<Release> {
     let tag = j.get("tag_name").and_then(|v| v.as_str()).unwrap_or("");
-    if tag.is_empty() || !newer(tag, super::config::VERSION) {
-        return Ok(None);
+    if tag.is_empty() {
+        return None;
     }
-    Ok(Some(Release {
-        version: tag.trim_start_matches('v').to_string(),
+    Some(Release {
+        version: tag.trim_start_matches(['v', 'V']).to_string(),
         url: j.get("html_url").and_then(|v| v.as_str()).unwrap_or(RELEASES_PAGE).to_string(),
         notes: j.get("body").and_then(|v| v.as_str()).unwrap_or("").chars().take(600).collect(),
         assets: j
@@ -90,16 +89,89 @@ pub async fn check_update(proxy: Option<&Proxy>) -> Result<Option<Release>> {
             .and_then(|a| a.as_array())
             .map(|a| a.iter().filter_map(|x| Some((x.get("name")?.as_str()?.to_string(), x.get("browser_download_url")?.as_str()?.to_string()))).collect())
             .unwrap_or_default(),
-    }))
+    })
 }
 
-/// 每天最多自动检查一次；设置里可以关掉（kv `check_updates` = "0"）
+/// 按 GitHub 返回的顺序挑第一个比 `local` 新的发布。`include_prerelease` 为假时跳过预发布；草稿一律跳过
+pub fn pick_newer(items: &[serde_json::Value], local: &str, include_prerelease: bool) -> Option<Release> {
+    items.iter().find_map(|j| {
+        if j.get("draft").and_then(|v| v.as_bool()) == Some(true) {
+            return None;
+        }
+        if j.get("prerelease").and_then(|v| v.as_bool()) == Some(true) && !include_prerelease {
+            return None;
+        }
+        let rel = release_from_json(j)?;
+        newer(&rel.version, local).then_some(rel)
+    })
+}
+
+/// 查 GitHub Releases；比当前新就返回。只读公开 JSON，不上传任何信息（不带设备标识）。
+/// `include_prerelease` 为真时看最近 20 条（含预发布），否则只看最新正式版
+pub async fn check_update(proxy: Option<&Proxy>, include_prerelease: bool) -> Result<Option<Release>> {
+    let url = if include_prerelease { RELEASES_LIST } else { RELEASES_API };
+    let r = http::request("GET", url, &[("Accept", "application/vnd.github+json")], None, proxy).await?;
+    if !r.ok() {
+        bail!("GitHub 返回 HTTP {}", r.status);
+    }
+    let j = r.json()?;
+    if include_prerelease {
+        Ok(j.as_array().and_then(|items| pick_newer(items, super::config::VERSION, true)))
+    } else {
+        Ok(release_from_json(&j).filter(|rel| newer(&rel.version, super::config::VERSION)))
+    }
+}
+
+/// kv 开关。没有写过时用 `default_on`
+pub fn kv_flag(store: &Store, key: &str, default_on: bool) -> bool {
+    match store.get_kv(key).as_deref() {
+        Some("0") => false,
+        Some("1") => true,
+        _ => default_on,
+    }
+}
+
+pub fn set_flag(store: &Store, key: &str, on: bool) {
+    store.set_kv(key, if on { "1" } else { "0" });
+}
+
+/// 自动检查间隔（分钟）。只接受关于页上的四档，其它值按 24 小时
+pub fn update_interval_min(store: &Store) -> u32 {
+    match store.get_kv("update_interval").as_deref() {
+        Some("30") => 30,
+        Some("60") => 60,
+        Some("360") => 360,
+        _ => 1440,
+    }
+}
+
+/// `all` = 每个版本（含预发布），其它 = 稳定版
+pub fn update_channel_all(store: &Store) -> bool {
+    store.get_kv("update_channel").as_deref() == Some("all")
+}
+
+pub fn remember_release(store: &Store, rel: &Release) {
+    store.set_kv("update_remote_version", &rel.version);
+    store.set_kv("update_remote_url", &rel.url);
+}
+
+pub fn clear_release(store: &Store) {
+    store.set_kv("update_remote_version", "");
+    store.set_kv("update_remote_url", "");
+}
+
+/// 最近一次发现的发布页；还没查到过就打开发布列表
+pub fn remembered_url(store: &Store) -> String {
+    store.get_kv("update_remote_url").filter(|s| s.starts_with("https://")).unwrap_or_else(|| RELEASES_PAGE.to_string())
+}
+
+/// 自动更新打开，并且距上次检查已超过「检查间隔」
 pub fn update_due(store: &Store) -> bool {
-    if store.get_kv("check_updates").as_deref() == Some("0") {
+    if !kv_flag(store, "check_updates", true) {
         return false;
     }
     let last: i64 = store.get_kv("update_checked_at").and_then(|v| v.parse().ok()).unwrap_or(0);
-    now_ms() - last > 24 * 3600 * 1000
+    now_ms() - last > update_interval_min(store) as i64 * 60 * 1000
 }
 
 pub fn mark_update_checked(store: &Store) {
@@ -266,6 +338,15 @@ mod tests {
         assert!(!newer("v1.0.0", "1.0.0"));
         assert!(!newer("0.9.0", "1.0.0"));
         assert!(!newer("garbage", "1.0.0"));
+    }
+
+    #[test]
+    fn picks_channel() {
+        let item = |tag: &str, pre: bool, draft: bool| serde_json::json!({"tag_name": tag, "html_url": "https://github.com/davidzhanghui/easymail/releases/tag/x", "body": "", "draft": draft, "prerelease": pre, "assets": []});
+        let items = vec![item("v9.0.0", false, true), item("v1.0.5-rc.1", true, false), item("v1.0.4", false, false)];
+        assert_eq!(pick_newer(&items, "1.0.3", false).unwrap().version, "1.0.4");
+        assert_eq!(pick_newer(&items, "1.0.3", true).unwrap().version, "1.0.5-rc.1");
+        assert!(pick_newer(&items, "1.0.5", true).is_none());
     }
 
     #[test]

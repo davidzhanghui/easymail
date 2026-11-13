@@ -171,9 +171,22 @@ pub fn commands() -> Vec<(Cmd, &'static str, &'static str)> {
     v
 }
 
-fn filter_cmds(q: &str) -> Vec<(Cmd, &'static str)> {
+fn filter_cmds(q: &str, show_update: bool) -> Vec<(Cmd, &'static str)> {
     let q = q.trim().to_lowercase();
-    commands().into_iter().filter(|(_, label, kw)| q.is_empty() || label.to_lowercase().contains(&q) || kw.contains(&q)).map(|(c, l, _)| (c, l)).collect()
+    commands()
+        .into_iter()
+        .filter(|(c, label, kw)| {
+            if !show_update && *c == Cmd::CheckUpdate {
+                return false;
+            }
+            q.is_empty() || label.to_lowercase().contains(&q) || kw.contains(&q)
+        })
+        .map(|(c, l, _)| (c, l))
+        .collect()
+}
+
+fn show_update_cmd(store: &crate::core::db::Store) -> bool {
+    tools::kv_flag(store, "update_button", true)
 }
 
 impl MailApp {
@@ -285,7 +298,7 @@ impl MailApp {
         let input = self.line("输入命令或视图名称…", "", cx);
         let sub = cx.subscribe_in(&input, window, |this: &mut Self, _, ev: &InputEvent, window, cx| {
             let Some(Modal::Panel(Panel::Palette { input, sel })) = &mut this.modal else { return };
-            let n = filter_cmds(&input.read(cx).text()).len();
+            let n = filter_cmds(&input.read(cx).text(), show_update_cmd(&this.store)).len();
             match ev {
                 InputEvent::Changed => {
                     *sel = 0;
@@ -300,7 +313,7 @@ impl MailApp {
                     this.palette_scroll.scroll_to_item(*sel);
                 }
                 InputEvent::Submit { .. } => {
-                    let list = filter_cmds(&input.read(cx).text());
+                    let list = filter_cmds(&input.read(cx).text(), show_update_cmd(&this.store));
                     if let Some((c, _)) = list.get(*sel).copied() {
                         this.run_cmd(c, window, cx);
                     }
@@ -817,20 +830,61 @@ impl MailApp {
         }
         tools::mark_update_checked(&self.store);
         let proxy = self.eng.proxy();
-        self.run(async move { tools::check_update(proxy.as_ref()).await }, cx, move |a, r, cx| match r {
+        let pre = tools::update_channel_all(&self.store);
+        self.run(async move { tools::check_update(proxy.as_ref(), pre).await }, cx, move |a, r, cx| match r {
             Ok(Some(rel)) => {
-                let msg = format!("发现新版本 {}（当前 {}）", rel.version, crate::core::config::VERSION);
-                if manual {
-                    a.open_update(rel, cx);
-                } else if updater::can_self_update(&rel) {
-                    a.toast_with(msg, false, Some(ToastAction::Update(rel)), cx)
+                tools::remember_release(&a.store, &rel);
+                let download = tools::kv_flag(&a.store, "update_auto_download", false) && updater::can_self_update(&rel);
+                if download {
+                    let restart = tools::kv_flag(&a.store, "update_auto_restart", false);
+                    a.download_update(rel, restart, cx);
                 } else {
-                    a.toast_with(msg, false, Some(ToastAction::Open(rel.url)), cx)
+                    let msg = format!("发现新版本 {}（当前 {}）", rel.version, crate::core::config::VERSION);
+                    if manual {
+                        a.open_update(rel, cx);
+                    } else if updater::can_self_update(&rel) {
+                        a.toast_with(msg, false, Some(ToastAction::Update(rel)), cx)
+                    } else {
+                        a.toast_with(msg, false, Some(ToastAction::Open(rel.url)), cx)
+                    }
                 }
             }
-            Ok(None) if manual => a.toast(format!("已是最新版本 {}", crate::core::config::VERSION), false, cx),
+            Ok(None) => {
+                tools::clear_release(&a.store);
+                if manual {
+                    a.toast(format!("已是最新版本 {}", crate::core::config::VERSION), false, cx);
+                }
+            }
             Err(e) if manual => a.toast(format!("检查更新失败：{e:#}"), true, cx),
             _ => {}
+        });
+    }
+
+    /// 后台下载并校验。`restart` 为真时完成后直接替换并退出
+    fn download_update(&mut self, rel: tools::Release, restart: bool, cx: &mut Context<Self>) {
+        if !updater::begin_download() {
+            self.toast("已有一个更新正在下载", false, cx);
+            return;
+        }
+        let version = rel.version.clone();
+        self.toast(format!("正在下载 {version}…"), false, cx);
+        let proxy = self.eng.proxy();
+        let proxy_url = self.store.settings().proxy_url;
+        self.run(async move { updater::prepare(&rel, proxy.as_ref(), &proxy_url).await }, cx, move |a, r, cx| {
+            updater::end_download();
+            match r {
+                Ok(staged) if restart => match updater::relaunch(&staged) {
+                    Ok(()) => cx.quit(),
+                    Err(e) => a.toast(format!("无法重启更新：{e:#}"), true, cx),
+                },
+                Ok(_) => {
+                    a.toast(format!("{version} 已下载，可在「关于」里重启完成更新"), false, cx);
+                    if let Some(Modal::Accounts(m)) = &a.modal {
+                        m.update(cx, |_, cx| cx.notify());
+                    }
+                }
+                Err(e) => a.toast(format!("更新失败：{e:#}"), true, cx),
+            }
         });
     }
 
@@ -844,11 +898,17 @@ impl MailApp {
         if *state == UpdateState::Working {
             return;
         }
+        if !updater::begin_download() {
+            *state = UpdateState::Failed("已有一个更新正在下载".into());
+            cx.notify();
+            return;
+        }
         *state = UpdateState::Working;
         let rel = rel.clone();
         let proxy = self.eng.proxy();
         let proxy_url = self.store.settings().proxy_url;
         self.run(async move { updater::prepare(&rel, proxy.as_ref(), &proxy_url).await }, cx, |a, r, cx| {
+            updater::end_download();
             let fail = |a: &mut Self, e: String, cx: &mut Context<Self>| {
                 if let Some(Modal::Panel(Panel::Update { state, .. })) = &mut a.modal {
                     *state = UpdateState::Failed(e);
@@ -1020,6 +1080,218 @@ impl MailApp {
         col
     }
 
+    /// 本地接口：开关、授权、调用记录分成三块，避免按钮和标签挤在一起。
+    fn render_local_api(&mut self, t: &Theme, close: Stateful<Div>, cx: &mut Context<Self>) -> AnyElement {
+        use crate::core::{bridge, mcp};
+        let on = mcp::enabled(&self.store);
+        let http = bridge::enabled(&self.store);
+        let http_token = http.then(|| bridge::token(&self.store));
+        let (accs, folder_acl) = mcp::acl(&self.store);
+        let lines = mcp::audit_tail(&self.store, 200);
+        let all_accounts = accs.is_empty();
+        let all_folders = folder_acl.is_empty();
+        let heading = |text: &str| div().text_size(px(11.)).text_color(t.muted).child(text.to_string());
+        let row = |id: &'static str, title: &str, detail: &str, on_state: bool| {
+            div()
+                .id(id)
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .px(px(14.))
+                .py(px(11.))
+                .cursor_pointer()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(div().text_size(px(13.)).text_color(t.ink).child(title.to_string()))
+                        .child(div().mt(px(2.)).text_size(px(12.)).text_color(t.muted).line_height(px(18.)).child(detail.to_string())),
+                )
+                .child(toggle(t, on_state))
+        };
+
+        let mut switches = div().rounded(px(10.)).border_1().border_color(t.border).child(
+            row("mcp-on", "MCP", "给本机上的命令行和 AI 工具读取已缓存的邮件。", on).on_click(cx.listener(|a, _, _, cx| {
+                crate::core::mcp::set_enabled(&a.store, !crate::core::mcp::enabled(&a.store));
+                crate::core::bridge::apply(a.store.clone());
+                a.open_local_api(cx);
+            })),
+        );
+        switches = switches.child(div().h(px(1.)).bg(t.border_soft)).child(
+            row("http-on", "本机 HTTP", "同一套只读工具，只接受 127.0.0.1 上的请求。", http).on_click(cx.listener(|a, _, _, cx| {
+                let next = !crate::core::bridge::enabled(&a.store);
+                if next {
+                    crate::core::mcp::set_enabled(&a.store, true);
+                }
+                crate::core::bridge::set_enabled(&a.store, next);
+                crate::core::bridge::apply(a.store.clone());
+                a.open_local_api(cx);
+            })),
+        );
+
+        let mut access = div().rounded(px(10.)).border_1().border_color(t.border).px(px(14.)).py(px(10.)).flex().flex_col().gap(px(8.));
+        if !on {
+            access = access.child(div().text_size(px(12.5)).text_color(t.muted).child("打开 MCP 之后，再选择账号和文件夹。"));
+        } else {
+            access = access.child(check_row("mcp-acc-all", t, all_accounts, "全部账号").on_click(cx.listener(|app, _, _, cx| {
+                let (_, folders) = crate::core::mcp::acl(&app.store);
+                crate::core::mcp::set_acl(&app.store, &[], &folders);
+                app.open_local_api(cx);
+            })));
+            let mut accounts = div().flex().flex_col().gap(px(2.)).pl(px(22.));
+            for a in self.accounts.clone() {
+                let id = a.id;
+                let sel = all_accounts || accs.contains(&id);
+                let n = self.accounts.len();
+                accounts = accounts.child(check_row(SharedString::from(format!("mcp-acc-{id}")), t, sel, a.email.clone()).on_click(cx.listener(
+                    move |app, _, _, cx| {
+                        let (mut accs, folders) = crate::core::mcp::acl(&app.store);
+                        if accs.is_empty() {
+                            accs = app.accounts.iter().map(|a| a.id).filter(|x| *x != id).collect();
+                        } else if let Some(i) = accs.iter().position(|x| *x == id) {
+                            if accs.len() == 1 {
+                                app.toast("至少留一个账号。要允许全部，勾选「全部账号」。", false, cx);
+                                return;
+                            }
+                            accs.remove(i);
+                        } else {
+                            accs.push(id);
+                            if accs.len() == n {
+                                accs.clear();
+                            }
+                        }
+                        crate::core::mcp::set_acl(&app.store, &accs, &folders);
+                        app.open_local_api(cx);
+                    },
+                )));
+            }
+            access = access.child(accounts);
+            access = access.child(div().h(px(1.)).bg(t.border_soft).my(px(2.)));
+            if all_accounts {
+                access = access.child(div().text_size(px(12.5)).text_color(t.muted).child("先取消「全部账号」，再按文件夹收窄。"));
+            } else {
+                let scope: Vec<i64> = self.folders.iter().filter(|f| accs.contains(&f.account_id)).map(|f| f.id).collect();
+                access = access.child(check_row("mcp-fol-all", t, all_folders, "全部文件夹").on_click(cx.listener(|app, _, _, cx| {
+                    let (accs, _) = crate::core::mcp::acl(&app.store);
+                    crate::core::mcp::set_acl(&app.store, &accs, &[]);
+                    app.open_local_api(cx);
+                })));
+                let mut groups = div().id("mcp-folders").flex().flex_col().gap(px(8.)).max_h(px(196.)).overflow_y_scroll().pl(px(22.));
+                for a in self.accounts.iter().filter(|a| accs.contains(&a.id)) {
+                    let mine: Vec<_> = self.folders.iter().filter(|f| f.account_id == a.id).take(24).cloned().collect();
+                    if mine.is_empty() {
+                        continue;
+                    }
+                    let mut chips = div().flex().flex_wrap().gap(px(6.));
+                    for f in &mine {
+                        let id = f.id;
+                        let sel = all_folders || folder_acl.contains(&id);
+                        let scope = scope.clone();
+                        chips = chips.child(chip(SharedString::from(format!("mcp-f-{id}")), t, f.label(), sel).on_click(cx.listener(move |app, _, _, cx| {
+                            let (accs, mut folders) = crate::core::mcp::acl(&app.store);
+                            if folders.is_empty() {
+                                folders = scope.iter().copied().filter(|x| *x != id).collect();
+                            } else if let Some(i) = folders.iter().position(|x| *x == id) {
+                                if folders.len() == 1 {
+                                    app.toast("至少留一个文件夹。要允许全部，勾选「全部文件夹」。", false, cx);
+                                    return;
+                                }
+                                folders.remove(i);
+                            } else {
+                                folders.push(id);
+                                if scope.iter().all(|x| folders.contains(x)) {
+                                    folders.clear();
+                                }
+                            }
+                            crate::core::mcp::set_acl(&app.store, &accs, &folders);
+                            app.open_local_api(cx);
+                        })));
+                    }
+                    groups = groups
+                        .child(div().flex().flex_col().gap(px(6.)).child(div().text_size(px(11.)).text_color(t.faint).child(a.email.clone())).child(chips));
+                }
+                access = access.child(groups);
+            }
+        }
+
+        let mut log_head = div().flex().items_center().child(heading("最近调用")).child(div().flex_1());
+        if !lines.is_empty() {
+            log_head = log_head.child(button("mcp-clear", t, Kind::Ghost, None, "清空记录", true).on_click(cx.listener(|a, _, _, cx| {
+                crate::core::mcp::clear_audit(&a.store);
+                a.open_local_api(cx);
+            })));
+        }
+        let mut log = div().rounded(px(10.)).border_1().border_color(t.border).bg(t.panel_2).overflow_hidden();
+        if lines.is_empty() {
+            log = log.child(div().px(px(14.)).py(px(14.)).text_size(px(12.5)).text_color(t.muted).child("还没有调用。命令行和 MCP 的读取会出现在这里。"));
+        } else {
+            let mut list = div().id("mcp-log").max_h(px(168.)).overflow_y_scroll().flex().flex_col();
+            for (i, line) in lines.iter().take(200).enumerate() {
+                let parts: Vec<&str> = line.splitn(4, '\t').collect();
+                let (when, tool, summary) = if parts.len() >= 4 {
+                    let when = if parts[0].len() >= 16 { parts[0][5..16].to_string() } else { parts[0].to_string() };
+                    (when, parts[1].to_string(), parts[3].to_string())
+                } else {
+                    (String::new(), String::new(), line.clone())
+                };
+                list = list.child(
+                    div()
+                        .id(("mcp-line", i))
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .px(px(12.))
+                        .h(px(32.))
+                        .border_b_1()
+                        .border_color(t.border_soft)
+                        .text_size(px(12.))
+                        .child(div().w(px(84.)).flex_none().font_family(MONO).text_size(px(11.)).text_color(t.muted).child(when))
+                        .child(div().w(px(118.)).flex_none().text_color(t.ink).overflow_hidden().whitespace_nowrap().text_ellipsis().child(tool))
+                        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(t.ink_2).child(summary)),
+                );
+            }
+            log = log.child(list);
+        }
+
+        let column = div()
+            .id("panel-body")
+            .px(px(22.))
+            .pt(px(16.))
+            .pb(px(18.))
+            .flex_none()
+            .h(px(460.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .child(heading("开关"))
+            .child(switches)
+            .when_some(http_token, |d, token| {
+                let mid = token.len().min(24);
+                let (a, b) = token.split_at(mid);
+                d.child(heading("本机调用")).child(
+                    div()
+                        .rounded(px(10.))
+                        .border_1()
+                        .border_color(t.border)
+                        .bg(t.panel_2)
+                        .px(px(14.))
+                        .py(px(10.))
+                        .child(div().text_size(px(11.)).text_color(t.muted).child("地址"))
+                        .child(div().mt(px(2.)).font_family(MONO).text_size(px(12.)).text_color(t.ink).child(format!("http://127.0.0.1:{}/tool", bridge::PORT)))
+                        .child(div().mt(px(8.)).text_size(px(11.)).text_color(t.muted).child("令牌"))
+                        .child(div().mt(px(2.)).font_family(MONO).text_size(px(12.)).text_color(t.ink).child(a.to_string()))
+                        .child(div().font_family(MONO).text_size(px(12.)).text_color(t.ink).child(b.to_string()))
+                        .child(div().mt(px(8.)).text_size(px(11.5)).text_color(t.muted).child("POST JSON，正文是 name 和 arguments，请求头带 Bearer 令牌。")),
+                )
+            })
+            .child(heading("允许读取"))
+            .child(access)
+            .child(log_head)
+            .child(log);
+        modal_shell(t, 560., "本地接口", "只读，默认关闭", close).child(column).into_any_element()
+    }
+
     pub(super) fn render_panel(&mut self, t: &Theme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let close = button("panel-x", t, Kind::Ghost, Some("close"), "", true).on_click(cx.listener(|a, _, w, cx| {
             a.modal = None;
@@ -1033,7 +1305,7 @@ impl MailApp {
         };
         match p {
             Panel::Palette { input, sel } => {
-                let list = filter_cmds(&input.read(cx).text());
+                let list = filter_cmds(&input.read(cx).text(), show_update_cmd(&self.store));
                 let sel = (*sel).min(list.len().saturating_sub(1));
                 let focused = input.read(cx).is_focused(window);
                 let total = list.len();
@@ -2113,106 +2385,7 @@ impl MailApp {
                     .child(button("tp-add", t, Kind::Primary, Some("plus"), "添加模板", false).on_click(cx.listener(|a, _, w, cx| a.add_template(w, cx))));
                 modal_shell(t, 620., "回复模板", format!("{} 个", list.len()), close).h(px(shell_h)).child(b).child(footer).into_any_element()
             }
-            Panel::LocalApi => {
-                use crate::core::{bridge, mcp};
-                let on = mcp::enabled(&self.store);
-                let http = bridge::enabled(&self.store);
-                let (accs, folders) = mcp::acl(&self.store);
-                let lines = mcp::audit_tail(&self.store, 200);
-                let mut b = body
-                    .child(
-                        div().text_size(px(12.)).text_color(t.ink_2).child("只读。不能发信、不能删信。正文和附件返回给外部程序时会标成不可信内容。默认关闭。"),
-                    )
-                    .child(
-                        div().flex().gap(px(8.)).child(
-                            button("mcp-on", t, if on { Kind::Primary } else { Kind::Secondary }, None, if on { "MCP 已打开" } else { "打开 MCP" }, false)
-                                .on_click(cx.listener(|a, _, _, cx| {
-                                    crate::core::mcp::set_enabled(&a.store, !crate::core::mcp::enabled(&a.store));
-                                    crate::core::bridge::apply(a.store.clone());
-                                    a.open_local_api(cx);
-                                })),
-                        ),
-                    );
-                let mut row = div().flex().flex_wrap().gap(px(6.));
-                for a in self.accounts.clone() {
-                    let id = a.id;
-                    let sel = accs.is_empty() || accs.contains(&id);
-                    row = row.child(chip(SharedString::from(format!("mcp-a-{id}")), t, a.email.clone(), sel).on_click(cx.listener(move |app, _, _, cx| {
-                        let (mut accs, folders) = crate::core::mcp::acl(&app.store);
-                        if accs.is_empty() {
-                            accs = app.accounts.iter().map(|a| a.id).filter(|x| *x != id).collect();
-                        } else if let Some(i) = accs.iter().position(|x| *x == id) {
-                            accs.remove(i);
-                        } else {
-                            accs.push(id);
-                        }
-                        crate::core::mcp::set_acl(&app.store, &accs, &folders);
-                        app.open_local_api(cx);
-                    })));
-                }
-                b = b.child(div().text_size(px(11.5)).text_color(t.muted).child("授权账号（全亮 = 全部账号）")).child(row);
-                let mut frow = div().flex().flex_wrap().gap(px(6.));
-                for f in self.folders.iter().filter(|f| accs.is_empty() || accs.contains(&f.account_id)).take(40) {
-                    let id = f.id;
-                    let sel = folders.is_empty() || folders.contains(&id);
-                    frow = frow.child(chip(SharedString::from(format!("mcp-f-{id}")), t, f.label(), sel).on_click(cx.listener(move |app, _, _, cx| {
-                        let (accs, mut folders) = crate::core::mcp::acl(&app.store);
-                        if folders.is_empty() {
-                            folders = app.folders.iter().map(|f| f.id).filter(|x| *x != id).collect();
-                        } else if let Some(i) = folders.iter().position(|x| *x == id) {
-                            folders.remove(i);
-                        } else {
-                            folders.push(id);
-                        }
-                        crate::core::mcp::set_acl(&app.store, &accs, &folders);
-                        app.open_local_api(cx);
-                    })));
-                }
-                b = b.child(div().text_size(px(11.5)).text_color(t.muted).child("授权文件夹（全亮 = 已授权账号下的全部文件夹）")).child(frow);
-                b = b.child(
-                    div().flex().gap(px(8.)).items_center().child(
-                        button(
-                            "http-on",
-                            t,
-                            if http { Kind::Primary } else { Kind::Secondary },
-                            None,
-                            if http { "本机 HTTP 已打开" } else { "打开本机 HTTP" },
-                            false,
-                        )
-                        .on_click(cx.listener(|a, _, _, cx| {
-                            let next = !crate::core::bridge::enabled(&a.store);
-                            if next {
-                                crate::core::mcp::set_enabled(&a.store, true);
-                            }
-                            crate::core::bridge::set_enabled(&a.store, next);
-                            crate::core::bridge::apply(a.store.clone());
-                            a.open_local_api(cx);
-                        })),
-                    ),
-                );
-                if http {
-                    b = b.child(div().text_size(px(11.5)).text_color(t.ink_2).child(format!(
-                        "POST http://127.0.0.1:{}/tool    Bearer {}",
-                        crate::core::bridge::PORT,
-                        crate::core::bridge::token(&self.store)
-                    )));
-                }
-                let mut log = div().id("mcp-log").flex().flex_col().gap(px(2.)).max_h(px(220.)).overflow_y_scroll();
-                if lines.is_empty() {
-                    log = log.child(div().text_size(px(12.)).text_color(t.muted).child("还没有调用记录"));
-                }
-                for (i, line) in lines.iter().take(200).enumerate() {
-                    log = log.child(div().id(("mcp-line", i)).text_size(px(11.)).text_color(t.ink_2).child(line.clone()));
-                }
-                b = b.child(div().text_size(px(11.5)).text_color(t.muted).child("最近调用")).child(log);
-                let footer = modal_footer(t).child(div().flex_1()).child(button("mcp-clear", t, Kind::Ghost, None, "清空记录", false).on_click(cx.listener(
-                    |a, _, _, cx| {
-                        crate::core::mcp::clear_audit(&a.store);
-                        a.open_local_api(cx);
-                    },
-                )));
-                modal_shell(t, 640., "本地接口", "MCP 与本机 HTTP，默认关闭", close).child(b).child(footer).into_any_element()
-            }
+            Panel::LocalApi => self.render_local_api(t, close, cx),
         }
     }
 }

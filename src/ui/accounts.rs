@@ -1,5 +1,5 @@
 //! 账号与设置：账号列表（同步 / 暂停 / 编辑 / 移除）、
-//! 添加 / 编辑表单（服务商预设、帮助步骤、连接测试）、同步与网络设置。
+//! 添加 / 编辑表单（服务商预设、帮助步骤、连接测试）、同步与网络设置、关于。
 
 use super::fmt_ago;
 use super::line_input::{InputEvent, LineInput};
@@ -10,7 +10,7 @@ use crate::core::accounts::{self, AccountInput, AccountPatch};
 use crate::core::engine::Engine;
 use crate::core::model::Account;
 use crate::core::providers::{self, PROVIDERS};
-use crate::core::{imap, smtp};
+use crate::core::{imap, smtp, tools, updater};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 
@@ -18,12 +18,15 @@ use gpui::*;
 pub enum Tab {
     Accounts,
     Settings,
+    About,
 }
 
 pub enum AccountsEvent {
     Close,
     Changed,
     Toast(String, bool),
+    /// 用已下载的新版本替换并退出
+    Restart,
 }
 
 impl EventEmitter<AccountsEvent> for AccountsModal {}
@@ -66,7 +69,6 @@ struct SettingsForm {
     undo_secs: Entity<LineInput>,
     mark_read_secs: Entity<LineInput>,
     dark_mail: bool,
-    check_updates: bool,
     strip_tracking: bool,
     export_dir: Entity<LineInput>,
     export_days: Entity<LineInput>,
@@ -111,7 +113,6 @@ impl AccountsModal {
             undo_secs: input(cx, &kv("undo_send_secs", "5"), "5"),
             mark_read_secs: input(cx, &kv("mark_read_secs", "0"), "0"),
             dark_mail: kv("dark_mail", "1") != "0",
-            check_updates: kv("check_updates", "1") != "0",
             strip_tracking: kv("strip_tracking", "1") != "0",
             export_dir: input(cx, &kv("auto_export_dir", ""), "留空 = 关闭"),
             export_days: input(cx, &kv("auto_export_days", "7"), "7"),
@@ -510,7 +511,6 @@ impl AccountsModal {
                 store.set_kv("undo_send_secs", &undo.to_string());
                 store.set_kv("mark_read_secs", &read_secs.to_string());
                 store.set_kv("dark_mail", flag(f.dark_mail));
-                store.set_kv("check_updates", flag(f.check_updates));
                 store.set_kv("strip_tracking", flag(f.strip_tracking));
                 store.set_kv("auto_export_dir", &text(&f.export_dir, cx));
                 store.set_kv("auto_export_days", &days.to_string());
@@ -783,14 +783,8 @@ impl AccountsModal {
                     }))
                     .into_any_element(),
             ]))
-            .child(group(t, "更新与备份"))
+            .child(group(t, "备份"))
             .child(card(t, vec![
-                toggle_row("check-updates", t, "自动检查更新", "每天最多一次请求 GitHub Releases，不带设备标识", s.check_updates)
-                    .on_click(cx.listener(|m, _, _, cx| {
-                        m.settings.check_updates = !m.settings.check_updates;
-                        cx.notify();
-                    }))
-                    .into_any_element(),
                 setting_row(t, "定时增量导出目录", "留空则不导出", wide(&s.export_dir)),
                 setting_row(t, "导出间隔", "单位：天", num(&s.export_days)),
             ]))
@@ -802,6 +796,190 @@ impl AccountsModal {
             ]))
             .child(div().mt(px(8.)).px(px(4.)).text_size(px(11.)).line_height(px(17.)).text_color(t.muted).child("Google 不允许开源客户端内置密钥，需要填你自己在 Google Cloud 创建的「桌面应用」凭据；不填则继续使用应用专用密码。Microsoft 内置应用在 Azure 中注册为「移动和桌面应用」，重定向 http://localhost。",))
     }
+
+    fn render_about(&mut self, t: &Theme, cx: &mut Context<Self>) -> Div {
+        let store = self.eng.store();
+        let button_on = tools::kv_flag(store, "update_button", true);
+        let auto = tools::kv_flag(store, "check_updates", true);
+        let every = tools::update_channel_all(store);
+        let download = tools::kv_flag(store, "update_auto_download", false);
+        let restart = tools::kv_flag(store, "update_auto_restart", false);
+        let interval = tools::update_interval_min(store);
+        let pending = updater::pending_version();
+        let notes_url = tools::remembered_url(store);
+        let dir = store.dir().to_path_buf();
+        let dir_label = shorten_home(&dir);
+        let switch = |id: &'static str, title: &'static str, desc: &'static str, on: bool| {
+            div().id(id).cursor_pointer().hover(|s| s.bg(t.row_hover)).child(setting_row(t, title, desc, toggle(t, on).into_any_element()))
+        };
+        let mut version_right = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(8.))
+            .child(div().text_size(px(13.)).text_color(t.ink_2).child(crate::core::config::VERSION.to_string()));
+        if pending.is_some() {
+            version_right = version_right.child(button("about-restart", t, Kind::Ghost, None, "重启以更新", true).on_click(cx.listener(|_, _, _, cx| {
+                cx.emit(AccountsEvent::Restart);
+            })));
+        }
+        let version = div()
+            .flex()
+            .items_center()
+            .gap(px(16.))
+            .px(px(14.))
+            .py(px(10.))
+            .min_h(px(54.))
+            .child(div().flex_1().min_w_0().child(div().text_size(px(13.)).text_color(t.ink).child("版本")).child(
+                div().mt(px(1.)).text_size(px(11.5)).line_height(px(16.)).text_color(t.muted).child(match &pending {
+                    Some(v) => format!("{v} 已下载"),
+                    None => "当前运行的版本".into(),
+                }),
+            ))
+            .child(version_right);
+        let intervals = [(30u32, "30 分钟"), (60, "1 小时"), (360, "6 小时"), (1440, "24 小时")];
+        let mut interval_ctl = div().flex().flex_wrap().justify_end().gap(px(6.)).max_w(px(360.));
+        for (mins, label) in intervals {
+            interval_ctl = interval_ctl.child(chip(SharedString::from(format!("upd-every-{mins}")), t, label, interval == mins).on_click(cx.listener(
+                move |m, _, _, cx| {
+                    m.eng.store().set_kv("update_interval", &mins.to_string());
+                    cx.notify();
+                },
+            )));
+        }
+        let channel = div()
+            .flex()
+            .gap(px(6.))
+            .child(chip("upd-all", t, "每个版本", every).on_click(cx.listener(|m, _, _, cx| {
+                m.eng.store().set_kv("update_channel", "all");
+                cx.notify();
+            })))
+            .child(chip("upd-stable", t, "稳定版", !every).on_click(cx.listener(|m, _, _, cx| {
+                m.eng.store().set_kv("update_channel", "stable");
+                cx.notify();
+            })));
+        let dir_copy = dir.clone();
+        let dir_open = dir.clone();
+        div()
+            .child(group(t, "版本与更新"))
+            .child(card(
+                t,
+                vec![
+                    version.into_any_element(),
+                    setting_row(
+                        t,
+                        "更新内容",
+                        "打开最近一次发布说明",
+                        button("about-notes", t, Kind::Ghost, None, "打开", true)
+                            .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&notes_url)))
+                            .into_any_element(),
+                    ),
+                    switch("upd-button", "更新按钮", "在工具菜单和命令面板里显示「检查更新」", button_on)
+                        .on_click(cx.listener(|m, _, _, cx| {
+                            tools::set_flag(m.eng.store(), "update_button", !tools::kv_flag(m.eng.store(), "update_button", true));
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                    switch("upd-auto", "自动更新", "按检查间隔查询 GitHub Releases，不带设备标识", auto)
+                        .on_click(cx.listener(|m, _, _, cx| {
+                            tools::set_flag(m.eng.store(), "check_updates", !tools::kv_flag(m.eng.store(), "check_updates", true));
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                    setting_row(t, "检查间隔", "自动更新打开后，按这个间隔查询", interval_ctl.into_any_element()),
+                    setting_row(t, "更新渠道", "稳定版只看正式发布；每个版本也包含预发布", channel.into_any_element()),
+                    switch("upd-download", "自动下载更新", "发现新版本后在后台下载并校验签名", download)
+                        .on_click(cx.listener(|m, _, _, cx| {
+                            tools::set_flag(m.eng.store(), "update_auto_download", !tools::kv_flag(m.eng.store(), "update_auto_download", false));
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                    switch("upd-restart", "自动重启更新", "后台下载完成后退出并换成新版本", restart)
+                        .on_click(cx.listener(|m, _, _, cx| {
+                            tools::set_flag(m.eng.store(), "update_auto_restart", !tools::kv_flag(m.eng.store(), "update_auto_restart", false));
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                ],
+            ))
+            .child(group(t, "项目"))
+            .child(card(
+                t,
+                vec![
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(16.))
+                        .px(px(14.))
+                        .py(px(10.))
+                        .min_h(px(54.))
+                        .child(
+                            div().flex_1().min_w_0().child(div().text_size(px(13.)).text_color(t.ink).child("配置目录")).child(
+                                div()
+                                    .mt(px(1.))
+                                    .text_size(px(11.5))
+                                    .line_height(px(16.))
+                                    .text_color(t.muted)
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(dir_label),
+                            ),
+                        )
+                        .child(button("about-copy", t, Kind::Ghost, None, "复制", true).on_click(cx.listener(move |_, _, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(dir_copy.display().to_string()));
+                            cx.emit(AccountsEvent::Toast("已复制".into(), false));
+                        })))
+                        .child(button("about-reveal", t, Kind::Ghost, None, "打开", true).on_click(cx.listener(move |_, _, _, cx| {
+                            cx.reveal_path(&dir_open);
+                        })))
+                        .into_any_element(),
+                    setting_row(
+                        t,
+                        "官网",
+                        "davidzhanghui.github.io/easymail",
+                        button("about-site", t, Kind::Ghost, None, "打开", true)
+                            .on_click(cx.listener(|_, _, _, cx| cx.open_url(tools::SITE)))
+                            .into_any_element(),
+                    ),
+                    setting_row(
+                        t,
+                        "开源许可",
+                        "MIT 许可",
+                        button("about-license", t, Kind::Ghost, None, "查看", true)
+                            .on_click(cx.listener(|_, _, _, cx| cx.open_url(tools::LICENSE_URL)))
+                            .into_any_element(),
+                    ),
+                    setting_row(
+                        t,
+                        "社区",
+                        "代码、发布和讨论都在 GitHub",
+                        button("about-github", t, Kind::Secondary, None, "GitHub", true)
+                            .on_click(cx.listener(|_, _, _, cx| cx.open_url(tools::REPO)))
+                            .into_any_element(),
+                    ),
+                    setting_row(
+                        t,
+                        "反馈问题",
+                        "到 GitHub 提交问题",
+                        button("about-feedback", t, Kind::Ghost, None, "打开", true)
+                            .on_click(cx.listener(|_, _, _, cx| cx.open_url(tools::FEEDBACK_URL)))
+                            .into_any_element(),
+                    ),
+                ],
+            ))
+    }
+}
+
+fn shorten_home(path: &std::path::Path) -> String {
+    let text = path.display().to_string();
+    if let Some(home) = dirs::home_dir() {
+        let home = home.display().to_string();
+        if let Some(rest) = text.strip_prefix(&home) {
+            return format!("~{rest}");
+        }
+    }
+    text
 }
 
 impl Render for AccountsModal {
@@ -822,10 +1000,16 @@ impl Render for AccountsModal {
             .child(chip("tab-settings", &t, "设置", self.tab == Tab::Settings).on_click(cx.listener(|m, _, _, cx| {
                 m.tab = Tab::Settings;
                 cx.notify();
+            })))
+            .child(chip("tab-about", &t, "关于", self.tab == Tab::About).on_click(cx.listener(|m, _, _, cx| {
+                m.tab = Tab::About;
+                cx.notify();
             })));
         let mut content = div().id("acc-scroll").flex_1().min_h_0().overflow_y_scroll().px(px(22.)).pt(px(10.)).pb(px(18.));
         if self.tab == Tab::Settings {
             content = content.child(self.render_settings(&t, window, cx));
+        } else if self.tab == Tab::About {
+            content = content.child(self.render_about(&t, cx));
         } else {
             content = content.child(section_title(&t, format!("已接入 · {}", self.accounts.len())));
             if self.accounts.is_empty() {

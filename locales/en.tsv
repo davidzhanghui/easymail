@@ -715,3 +715,64 @@ Tab 切换栏位，回车保存。邮件里出现过的名字会自动识别，�
 把这个账号全部拉下来	Download this whole account
 暂停拉取	Pause download
 复制 {} 封，跳过已存在 {} 封，之前已复制 {} 封，失败 {} 封{}	Copied {}, skipped {} already there, {} copied earlier, {} failed{}
+只读，默认关闭	Read-only, off by default
+开关	Switches
+给本机上的命令行和 AI 工具读取已缓存的邮件。	Lets the CLI and AI tools on this Mac read mail that is already cached.
+同一套只读工具，只接受 127.0.0.1 上的请求。	The same read-only tools, only for requests from 127.0.0.1.
+已打开	On
+已关闭	Off
+允许读取	Who can read
+打开 MCP 之后，再选择账号和文件夹。	Turn MCP on, then choose accounts and folders.
+全部账号	All accounts
+全部文件夹	All folders
+先取消「全部账号」，再按文件夹收窄。	Turn off All accounts before narrowing by folder.
+本机调用	On this Mac
+地址	Address
+令牌	Token
+POST JSON，正文是 name 和 arguments，请求头带 Bearer 令牌。	POST JSON with name and arguments, and a Bearer token header.
+最近调用	Recent calls
+清空记录	Clear log
+还没有调用。命令行和 MCP 的读取会出现在这里。	No calls yet. Reads from the CLI and MCP will show up here.
+至少留一个账号。要允许全部，勾选「全部账号」。	Keep at least one account. To allow every account, turn on All accounts.
+至少留一个文件夹。要允许全部，勾选「全部文件夹」。	Keep at least one folder. To allow every folder, turn on All folders.
+关于	About
+版本	Version
+当前运行的版本	The version that is running
+{} 已下载	{} downloaded
+重启以更新	Restart to update
+版本与更新	Version and updates
+更新内容	Release notes
+打开最近一次发布说明	Open the latest release notes
+更新按钮	Update button
+在工具菜单和命令面板里显示「检查更新」	Show Check for Updates in the Tools menu and command palette
+自动更新	Automatic updates
+按检查间隔查询 GitHub Releases，不带设备标识	Ask GitHub Releases on the interval below, with no device id
+检查间隔	Check interval
+自动更新打开后，按这个间隔查询	Used while automatic updates are on
+30 分钟	30 minutes
+1 小时	1 hour
+6 小时	6 hours
+24 小时	24 hours
+更新渠道	Update channel
+稳定版只看正式发布；每个版本也包含预发布	Stable is official releases only; Every version also includes pre-releases
+每个版本	Every version
+稳定版	Stable
+自动下载更新	Download updates automatically
+发现新版本后在后台下载并校验签名	Download and verify the signature in the background
+自动重启更新	Restart to apply updates
+后台下载完成后退出并换成新版本	Quit and switch to the new version when the download finishes
+项目	Project
+配置目录	Config folder
+设置、账号和本地邮件都在这个目录	Settings, accounts, and local mail live here
+官网	Website
+开源许可	Open-source license
+MIT 许可	MIT license
+社区	Community
+代码、发布和讨论都在 GitHub	Code, releases, and discussion are on GitHub
+反馈问题	Send feedback
+到 GitHub 提交问题	Open a GitHub issue
+正在下载 {}…	Downloading {}…
+{} 已下载，可在「关于」里重启完成更新	{} is downloaded. Restart from About to finish
+无法重启更新：{}	Could not restart to update: {}
+已有一个更新正在下载	An update is already downloading
+备份	Backup
